@@ -19,12 +19,15 @@ import { FilesetResolver, ObjectDetector }
   from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs';
 
 const WASM_PATH = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm';
-// EfficientDet-Lite0, uint8 quantized: 4.5MB, versus 13.8MB for the float32
-// build of the same model. On a phone that download difference matters more
-// than the accuracy difference does for a preview overlay. The server runs
-// Lite2 (23MB) for the analysis that actually counts.
+// Lite0 (4.5MB) was tried first for the smaller download, but it was trained
+// almost entirely on COCO's small, distant "sports ball" examples: tested
+// against a ball filling a real framing shot, its top guess was "frisbee" or
+// "suitcase" — never "sports ball" above the score floor, so the live overlay
+// never drew anything. Lite2 int8 (7.5MB, same architecture the server uses
+// for the analysis that counts) gets both close-up and distant balls right
+// with 0.6-0.8 confidence. Confirmed by direct test against real photos.
 const MODEL_URL =
-  'https://storage.googleapis.com/mediapipe-tasks/object_detector/efficientdet_lite0_uint8.tflite';
+  'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/int8/1/efficientdet_lite2.tflite';
 
 const BALL_CATEGORY = 'sports ball';   // the COCO class a football comes back as
 const SCORE_FLOOR = 0.2;

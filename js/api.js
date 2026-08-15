@@ -5,19 +5,13 @@
  * at full resolution, runs the heavy pose model and the ball tracker, and
  * returns the finished analysis. See server/main.py.
  *
- * The server URL is whatever ngrok (or your own host) hands you, so it is
- * user-supplied and remembered between sessions rather than baked in.
+ * The server address is fixed rather than user-entered — there is exactly one
+ * deployment this app talks to. Update SERVER_URL when the tunnel changes.
  */
 
-const KEY = 'sfai.serverUrl';
+const SERVER_URL = 'https://emote-galore-panther.ngrok-free.dev';
 
-export const getServerUrl = () => localStorage.getItem(KEY) || '';
-
-export function setServerUrl(url) {
-  const clean = String(url || '').trim().replace(/\/+$/, '');
-  if (clean) localStorage.setItem(KEY, clean); else localStorage.removeItem(KEY);
-  return clean;
-}
+export const getServerUrl = () => SERVER_URL;
 
 export class ApiError extends Error {
   constructor(message, { status = 0, detail = null } = {}) {
