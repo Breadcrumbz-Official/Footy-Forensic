@@ -296,42 +296,34 @@ def _warnings(spec: AnalyseSpec, ctx, frames, per_phase) -> list[str]:
 
     times = [spec.phases[p].time for p in PHASES]
     if not (times[0] < times[1] < times[2]):
-        out.append("Your three moments are not in chronological order "
-                   "(plant → contact → follow-through), so direction and leg "
-                   "detection may be wrong.")
+        out.append("Moments aren't in order (plant → contact → follow-through) — "
+                   "direction and leg detection may be off.")
 
     if ctx.view.label == "face-on":
         out.append(
-            f"This looks close to face-on (shoulder span {ctx.view.shoulder_ratio:.2f} "
-            "× torso). Fore/aft measurements — plant placement, reach, torso lean — "
-            "cannot be read from this angle and have been left unscored. "
-            "Film side-on, level with the ball, for a full analysis.")
+            f"Close to face-on (shoulder span {ctx.view.shoulder_ratio:.2f}× torso) — "
+            "fore/aft metrics left unscored. Film side-on for a full read.")
     elif ctx.view.label == "angled":
-        out.append(
-            "The camera is only partly side-on, so fore/aft measurements are "
-            "compressed and will read lower than reality. Square the camera up "
-            "to the line of the shot for the most accurate scoring.")
+        out.append("Only partly side-on — fore/aft metrics read lower than reality. "
+                   "Square up to the line of the shot.")
 
     if ctx.leg_source == "stated":
         inferred = biomechanics.inferred_kick_side(frames)
         if inferred != ctx.kick_side and ctx.leg_confidence > 0.5:
             out.append(
-                f"You selected {ctx.kick_side}-footed, but in these frames the "
-                f"{inferred} leg is the one swinging. Using your selection. If the "
-                "results look mirrored, check the setting or your frame picks.")
+                f"You picked {ctx.kick_side}-footed, but the {inferred} leg is the "
+                "one swinging here. Using your selection.")
     elif ctx.leg_confidence < 0.35:
-        out.append("The two legs looked similar in this view, so the kicking-leg "
-                   "call is uncertain — set your strong foot explicitly for a "
-                   "reliable read.")
+        out.append("Legs looked similar, so the kicking-leg call is uncertain — "
+                   "set your strong foot explicitly.")
 
     contact_ball = frames["contact"]["ball"]
     if contact_ball:
         d = analysis.foot_to_ball_distance(frames["contact"]["pts"], contact_ball)
         if d is not None and d > CONTACT_NEAR_TORSO:
             out.append(
-                f"At your contact frame the nearest foot is {d:.2f} torso lengths "
-                "from the ball, so this may not be the moment of the strike. Every "
-                "contact metric assumes it is — worth re-picking.")
+                f"Nearest foot is {d:.2f} torso lengths from the ball at contact — "
+                "may not be the actual strike frame. Worth re-picking.")
 
     # "Plant foot vs ball" is scored at both plant and contact; either one
     # missing the ball just drops that one metric, not the phase — the rest of
@@ -339,18 +331,15 @@ def _warnings(spec: AnalyseSpec, ctx, frames, per_phase) -> list[str]:
     # than left to be inferred from a quietly absent metric.
     no_ball = [p for p in ("plant", "contact") if not frames[p]["ball"]]
     if len(no_ball) == 2:
-        out.append("No ball was tracked at plant or contact, so the two "
-                   "ball-relative metrics were skipped — scoring ran on body "
-                   "position alone. A clearer view of the ball would add them "
-                   "back in; everything else here is unaffected.")
+        out.append("No ball tracked at plant or contact — those two ball-relative "
+                   "metrics were skipped, scored on body position alone.")
     elif no_ball:
-        out.append(f"No ball was tracked at {PHASE_LABEL[no_ball[0]].lower()}, so "
-                   "that phase's 'plant foot vs ball' metric was skipped — the "
-                   "rest of its score comes from body position alone.")
+        out.append(f"No ball tracked at {PHASE_LABEL[no_ball[0]].lower()} — its "
+                   "'plant foot vs ball' metric was skipped.")
 
     for p in PHASES:
         shifted = per_phase[p].get("shifted_ms", 0)
         if shifted:
-            out.append(f"{PHASE_LABEL[p]}: the exact instant you picked was unreadable, "
-                       f"so the nearest clean frame ({shifted:+d}ms) was used.")
+            out.append(f"{PHASE_LABEL[p]}: picked instant was unreadable, used "
+                       f"nearest clean frame ({shifted:+d}ms).")
     return out
