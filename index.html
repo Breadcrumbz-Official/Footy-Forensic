@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soccer Form AI</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%BD%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>Soccer Form AI</h1>
+  <p class="muted">Record or upload a kick, pick 3 key moments, get biomechanical coaching.</p>
+  <p class="notice"><strong>Your video is uploaded to the analysis server you connect below.</strong>
+     The live camera preview and skeleton run locally in this tab and are not sent anywhere;
+     the video file itself is sent only when you press <em>Analyze technique</em>. The server
+     deletes each upload as soon as it has read the frames it needs.</p>
+  <p id="engineStatus" class="muted">Live preview engines: loading…</p>
+</header>
+
+<!-- ── 0. SERVER ──────────────────────────────────────────── -->
+<section id="secServer">
+  <h2>1. Connect the analysis server</h2>
+  <div class="row">
+    <label>Server URL
+      <input type="url" id="serverUrl" placeholder="https://xxxx-xx-xx.ngrok-free.app" size="38">
+    </label>
+    <button id="btnConnect">Connect</button>
+  </div>
+  <p id="serverStatus" class="muted">Not connected.</p>
+  <details>
+    <summary>How to start the server</summary>
+    <p class="muted">On the machine doing the analysis, from the <code>server/</code> folder:</p>
+    <pre class="mono">pip install -r requirements.txt
+python -m uvicorn main:app --host 0.0.0.0 --port 8000</pre>
+    <p class="muted">Then expose it and paste the https URL it prints above:</p>
+    <pre class="mono">ngrok http 8000</pre>
+  </details>
+</section>
+
+<!-- ── 1. INPUT ───────────────────────────────────────────── -->
+<section id="secInput">
+  <h2>2. Get a video</h2>
+
+  <div class="row">
+    <label>Which foot do you shoot with?
+      <select id="footedness">
+        <option value="auto">Auto-detect from the video</option>
+        <option value="right">Right-footed</option>
+        <option value="left">Left-footed</option>
+      </select>
+    </label>
+  </div>
+  <p class="muted">Telling us beats guessing. From a side-on camera the near and far leg
+     overlap constantly, and picking the wrong one mirrors every result.</p>
+
+  <p class="notice">📐 <strong>Film side-on.</strong> Stand the camera level with the ball,
+     square to the line of the shot, with the whole body in frame. Every fore/aft
+     measurement — plant placement, backswing reach, torso lean — is read across the
+     image, so a face-on angle flattens them to nothing and they will not be scored.</p>
+
+  <div class="row">
+    <label>Upload: <input type="file" id="fileInput" accept="video/*"></label>
+  </div>
+
+  <div class="row">
+    <button id="btnCam">Enable camera</button>
+    <button id="btnFlip" disabled>Flip camera</button>
+    <button id="btnRec" disabled>Record (auto-stop 10s)</button>
+    <button id="btnStop" disabled>Stop</button>
+    <span id="recTimer"></span>
+  </div>
+
+  <div class="row">
+    <label><input type="checkbox" id="chkLiveSkeleton"> Show skeleton</label>
+    <label><input type="checkbox" id="chkLiveAngles"> Show joint angles</label>
+    <label><input type="checkbox" id="chkLiveBall"> Show ball</label>
+  </div>
+  <p class="muted">Live preview only, computed in this tab. The joint angles are read off the
+     same three landmark coordinates the server scores with (e.g. hip-knee-ankle for a knee).</p>
+
+  <div id="camWrap" class="camWrap">
+    <video id="camPreview" playsinline muted autoplay hidden></video>
+    <canvas id="camOverlay" hidden></canvas>
+  </div>
+  <p id="viewHint" class="muted"></p>
+  <p id="inputMsg" class="msg"></p>
+</section>
+
+<!-- ── 2. SCRUB + SELECT ──────────────────────────────────── -->
+<section id="secPlayer" hidden>
+  <h2>3. Scrub and select 3 moments</h2>
+
+  <video id="video" playsinline preload="auto"></video>
+
+  <div id="filmstrip" class="filmstrip">
+    <div id="filmstripTrack" class="filmstripTrack"></div>
+    <div class="filmstripPlayhead"></div>
+  </div>
+  <p id="filmstripMsg" class="muted">Drag the filmstrip below (or scroll over it) to scrub frame by frame.</p>
+
+  <div class="row">
+    <button id="btnBack10">&#9664;&#9664; 10f</button>
+    <button id="btnBack1">&#9664; Frame</button>
+    <button id="btnPlay">Play</button>
+    <button id="btnFwd1">Frame &#9654;</button>
+    <button id="btnFwd10">10f &#9654;&#9654;</button>
+    <span id="timeLabel" class="mono">0.000 / 0.000 s</span>
+  </div>
+
+  <div class="row">
+    <label>Assumed FPS <input type="number" id="fps" value="30" min="1" max="240" step="1" style="width:5em"></label>
+    <span class="muted">(used for frame stepping)</span>
+  </div>
+
+  <p class="muted">Each moment is analyzed from a short clip, not one still, so a blurry
+     instant doesn't throw off the reading. By default that's an automatic ±0.13s window
+     around the frame you pick — or scrub to a start/end point and set them yourself.
+     The clips are cut on the server from the original video.</p>
+
+  <div id="phaseGrid">
+    <div class="phase" data-phase="plant">
+      <h3>1. Plant + Backswing</h3>
+      <canvas class="thumb"></canvas>
+      <p class="pstat muted">not selected</p>
+      <div class="row clipRow">
+        <button class="btnClipStart">Set clip start</button>
+        <button class="btnClipEnd">Set clip end</button>
+        <button class="btnClipReset" disabled>Auto</button>
+      </div>
+      <p class="clipStat muted">clip: auto (±0.13s around your pick)</p>
+      <button class="btnSel">Use current frame</button>
+      <button class="btnGoto" disabled>Go to</button>
+      <button class="btnClear" disabled>Clear</button>
+    </div>
+    <div class="phase" data-phase="contact">
+      <h3>2. Contact</h3>
+      <canvas class="thumb"></canvas>
+      <p class="pstat muted">not selected</p>
+      <div class="row clipRow">
+        <button class="btnClipStart">Set clip start</button>
+        <button class="btnClipEnd">Set clip end</button>
+        <button class="btnClipReset" disabled>Auto</button>
+      </div>
+      <p class="clipStat muted">clip: auto (±0.13s around your pick)</p>
+      <button class="btnSel">Use current frame</button>
+      <button class="btnGoto" disabled>Go to</button>
+      <button class="btnClear" disabled>Clear</button>
+    </div>
+    <div class="phase" data-phase="followThrough">
+      <h3>3. Follow-through</h3>
+      <canvas class="thumb"></canvas>
+      <p class="pstat muted">not selected</p>
+      <div class="row clipRow">
+        <button class="btnClipStart">Set clip start</button>
+        <button class="btnClipEnd">Set clip end</button>
+        <button class="btnClipReset" disabled>Auto</button>
+      </div>
+      <p class="clipStat muted">clip: auto (±0.13s around your pick)</p>
+      <button class="btnSel">Use current frame</button>
+      <button class="btnGoto" disabled>Go to</button>
+      <button class="btnClear" disabled>Clear</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="btnAnalyze" disabled>Analyze technique</button>
+    <span id="analyzeMsg" class="msg"></span>
+  </div>
+  <div id="progressWrap" hidden>
+    <div class="bar"><i id="progressBar" style="width:0%"></i></div>
+    <p id="progressMsg" class="muted"></p>
+  </div>
+</section>
+
+<!-- ── 3. RESULTS ─────────────────────────────────────────── -->
+<section id="secResults" hidden>
+  <h2>4. Results</h2>
+  <div id="overall"></div>
+  <div id="warnings"></div>
+  <div id="phaseCards"></div>
+  <details>
+    <summary>What this system can and cannot measure</summary>
+    <div class="two">
+      <div>
+        <strong>Reasonably detectable (2D landmarks, side-on camera)</strong>
+        <ul>
+          <li>Joint angles (knee, hip, ankle)</li>
+          <li>Torso lean relative to vertical</li>
+          <li>Limb positions relative to the hips, normalized by torso length</li>
+          <li>Whether the body mass is stacked over the support foot</li>
+          <li>Where the ball is, and the plant foot's fore/aft position relative to it</li>
+        </ul>
+      </div>
+      <div>
+        <strong>Unreliable / not measured</strong>
+        <ul>
+          <li>The exact point on the boot that met the ball (the ball is tracked as a circle, not a contact patch)</li>
+          <li>Ball speed, spin, or where the shot went</li>
+          <li>True 3D hip rotation from one camera — only a rough 2D proxy is shown</li>
+          <li>Lateral (side-to-side) plant-foot distance from the ball — only the fore/aft component is judged</li>
+          <li>Anything depending on depth toward/away from the camera</li>
+        </ul>
+      </div>
+    </div>
+    <p class="muted">Metrics marked <em>low confidence</em> are shown but excluded from the score.</p>
+  </details>
+  <button id="btnRestart">Start over</button>
+</section>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
