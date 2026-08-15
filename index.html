@@ -12,36 +12,16 @@
 <header>
   <h1>Soccer Form AI</h1>
   <p class="muted">Record or upload a kick, pick 3 key moments, get biomechanical coaching.</p>
-  <p class="notice"><strong>Your video is uploaded to the analysis server you connect below.</strong>
-     The live camera preview and skeleton run locally in this tab and are not sent anywhere;
-     the video file itself is sent only when you press <em>Analyze technique</em>. The server
-     deletes each upload as soon as it has read the frames it needs.</p>
+  <p class="notice"><strong>Your video is uploaded to the analysis server when you press Analyze.</strong>
+     The live camera preview and skeleton run locally in this tab and are not sent anywhere.
+     The server deletes each upload as soon as it has read the frames it needs.</p>
   <p id="engineStatus" class="muted">Live preview engines: loading…</p>
+  <p id="serverStatus" class="muted"></p>
 </header>
-
-<!-- ── 0. SERVER ──────────────────────────────────────────── -->
-<section id="secServer">
-  <h2>1. Connect the analysis server</h2>
-  <div class="row">
-    <label>Server URL
-      <input type="url" id="serverUrl" placeholder="https://xxxx-xx-xx.ngrok-free.app" size="38">
-    </label>
-    <button id="btnConnect">Connect</button>
-  </div>
-  <p id="serverStatus" class="muted">Not connected.</p>
-  <details>
-    <summary>How to start the server</summary>
-    <p class="muted">On the machine doing the analysis, from the <code>server/</code> folder:</p>
-    <pre class="mono">pip install -r requirements.txt
-python -m uvicorn main:app --host 0.0.0.0 --port 8000</pre>
-    <p class="muted">Then expose it and paste the https URL it prints above:</p>
-    <pre class="mono">ngrok http 8000</pre>
-  </details>
-</section>
 
 <!-- ── 1. INPUT ───────────────────────────────────────────── -->
 <section id="secInput">
-  <h2>2. Get a video</h2>
+  <h2>1. Get a video</h2>
 
   <div class="row">
     <label>Which foot do you shoot with?
@@ -90,7 +70,7 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8000</pre>
 
 <!-- ── 2. SCRUB + SELECT ──────────────────────────────────── -->
 <section id="secPlayer" hidden>
-  <h2>3. Scrub and select 3 moments</h2>
+  <h2>2. Scrub and select 3 moments</h2>
 
   <video id="video" playsinline preload="auto"></video>
 
@@ -176,7 +156,7 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8000</pre>
 
 <!-- ── 3. RESULTS ─────────────────────────────────────────── -->
 <section id="secResults" hidden>
-  <h2>4. Results</h2>
+  <h2>3. Results</h2>
   <div id="overall"></div>
   <div id="warnings"></div>
   <div id="phaseCards"></div>

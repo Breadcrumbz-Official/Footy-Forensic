@@ -53,28 +53,18 @@ initBall()
   .finally(renderEngineStatus);
 
 /* ── Server connection ──────────────────────────────────────────────────── */
+// The server address is fixed (js/api.js) — nothing for the user to type or
+// click here. Just confirm it's reachable, quietly, and keep retrying in the
+// background until it is: an ngrok tunnel can take a few seconds to wake up.
 
-$('#serverUrl').value = api.getServerUrl();
-
-async function connect(url, { quiet = false } = {}) {
-  const clean = api.setServerUrl(url);
-  $('#serverUrl').value = clean;
-  if (!clean) {
-    serverInfo = null;
-    setServerStatus('Not connected. Paste your server or ngrok URL above.', 'err');
-    refreshAnalyzeButton();
-    return;
-  }
-  setServerStatus('Connecting…');
+async function connectServer() {
   try {
-    serverInfo = await api.checkHealth(clean);
-    setServerStatus(
-      `Connected · ${serverInfo.workers} workers · pose ${serverInfo.poseModel} · ball ${serverInfo.ballModel}`,
-      'ok');
+    serverInfo = await api.checkHealth(api.getServerUrl());
+    setServerStatus(`Analysis server connected · ${serverInfo.workers} workers`, 'ok');
   } catch (err) {
     serverInfo = null;
-    if (!quiet) setServerStatus(err.message, 'err');
-    else setServerStatus(`Saved, but not reachable right now: ${err.message}`, 'err');
+    setServerStatus(`Analysis server unreachable: ${err.message} Retrying…`, 'err');
+    setTimeout(connectServer, 8000);
   }
   refreshAnalyzeButton();
 }
@@ -85,23 +75,7 @@ function setServerStatus(text, kind) {
   el.className = kind === 'ok' ? 'ok' : kind === 'err' ? 'msg' : 'muted';
 }
 
-$('#btnConnect').addEventListener('click', () => connect($('#serverUrl').value));
-$('#serverUrl').addEventListener('keydown', e => {
-  if (e.key === 'Enter') { e.preventDefault(); connect($('#serverUrl').value); }
-});
-// Re-check a remembered URL on load — an ngrok tunnel from a previous session
-// has usually died, and finding that out now beats finding out after recording.
-if (api.getServerUrl()) {
-  connect(api.getServerUrl(), { quiet: true });
-} else if (location.protocol !== 'file:') {
-  // Nothing remembered: the server may be serving this page itself, in which
-  // case the API is on this very origin and there is nothing to paste. Probe
-  // before connecting so a page served from a plain static host doesn't save a
-  // dead URL and then complain about it on every reload.
-  api.checkHealth(location.origin)
-     .then(() => connect(location.origin, { quiet: true }))
-     .catch(() => {});
-}
+connectServer();
 
 /* ── Video input ────────────────────────────────────────────────────────── */
 
@@ -167,12 +141,25 @@ $('#btnStop').addEventListener('click', () => recorder.stop());
 
 /* ── Live skeleton / angle / ball overlay ───────────────────────────────── */
 
-// Pose runs every tick; ball runs on a much slower cadence and its last known
-// position is redrawn in between. Object detection costs several times what
-// pose does, and letting it share the pose budget would drop the skeleton to a
-// stutter — which is the part you actually frame the shot with.
+// Pose runs every tick; ball runs on a much slower cadence. Object detection
+// costs several times what pose does — measured around half a second per
+// frame on CPU, versus pose's GPU-driven ~33ms — and letting it share the
+// pose budget would drop the skeleton to a stutter, which is the part you
+// actually frame the shot with. That gap can't be closed by asking the model
+// for more frames; the fix is to not need more of them. Each tick, instead of
+// redrawing the last detection frozen in place (a hold-then-jump that looks
+// broken next to the buttery skeleton), we extrapolate along the ball's last
+// known velocity — the same dead-reckoning trick video game netcode uses to
+// hide a sparse, laggy signal. See getSmoothedBall below.
 const LIVE_INTERVAL_MS = 33;    // ~30 pose detections/sec ceiling
-const BALL_INTERVAL_MS = 200;   // ~5 ball detections/sec ceiling
+const BALL_INTERVAL_MS = 200;   // ball detection ceiling; actual rate is
+                                 // slower and self-limited by ballBusy below
+const BALL_EXTRAPOLATE_MAX_MS = 350; // stop projecting motion past this long
+                                      // since the last real detection — a
+                                      // ball that's been unseen this long
+                                      // isn't still traveling in a straight
+                                      // line, and holding position (rather
+                                      // than flying off-screen) reads better
 
 let liveShowSkeleton = false;
 let liveShowAngles = false;
@@ -181,7 +168,8 @@ let liveTimer = null;
 let liveBusy = false;
 let ballBusy = false;
 let lastBallAt = 0;
-let lastBall = null;
+let ballPrev = null;   // {x, y, r, t} — the detection before ballCurr
+let ballCurr = null;   // {x, y, r, t} — most recent real detection
 let lastViewLabel = null;
 
 const liveOverlayWanted = () => liveShowSkeleton || liveShowAngles || liveShowBall;
@@ -199,7 +187,7 @@ function startLiveLoop() {
   resetLiveClock();
   resetBallLive();
   liveBusy = ballBusy = false;
-  lastBall = null;
+  ballPrev = ballCurr = null;
   lastBallAt = 0;
 
   liveTimer = setInterval(async () => {
@@ -217,11 +205,12 @@ function startLiveLoop() {
 
       if (pts) updateViewHint(pts);
       if (liveShowBall) maybeDetectBall(frame, scale, overlay);
-      else lastBall = null;
+      else ballPrev = ballCurr = null;
 
+      const ball = liveShowBall ? scaleBall(getSmoothedBall(performance.now()), frame, overlay) : null;
       drawOverlay(overlay, pts, {
         skeleton: liveShowSkeleton, angles: liveShowAngles,
-        ball: liveShowBall ? scaleBall(lastBall, frame, overlay) : null
+        ball
       });
     } catch (err) {
       console.error(err);
@@ -239,9 +228,31 @@ function maybeDetectBall(frame, scale, overlay) {
   ballBusy = true;
   lastBallAt = now;
   detectBallLive(frame, scale ? scale * (frame.width / overlay.width) : null)
-    .then(b => { lastBall = b; })
-    .catch(err => { console.warn('live ball:', err); lastBall = null; })
+    .then(b => {
+      const t = performance.now();
+      if (b) { ballPrev = ballCurr; ballCurr = { ...b, t }; }
+      // A real miss (ball genuinely gone, per detectBallLive's own forget
+      // logic) — stop extrapolating rather than fly a phantom ring onward.
+      else { ballPrev = ballCurr = null; }
+    })
+    .catch(err => { console.warn('live ball:', err); ballPrev = ballCurr = null; })
     .finally(() => { ballBusy = false; });
+}
+
+/** What to draw *this* render tick, given detections that only land every
+ *  BALL_INTERVAL_MS-or-slower. With two real samples we know a velocity;
+ *  project the ball forward along it for the (up to ~30) ticks between them,
+ *  so the ring glides instead of teleporting. One sample, or a stale pair, and
+ *  there's nothing honest to extrapolate — just hold position. */
+function getSmoothedBall(now) {
+  if (!ballCurr) return null;
+  if (!ballPrev) return ballCurr;
+  const dt = ballCurr.t - ballPrev.t;
+  const elapsed = now - ballCurr.t;
+  if (dt <= 0 || elapsed < 0 || elapsed > BALL_EXTRAPOLATE_MAX_MS) return ballCurr;
+  const vx = (ballCurr.x - ballPrev.x) / dt;
+  const vy = (ballCurr.y - ballPrev.y) / dt;
+  return { x: ballCurr.x + vx * elapsed, y: ballCurr.y + vy * elapsed, r: ballCurr.r };
 }
 
 /** The ball comes back in the captured frame's pixel space; the overlay canvas
@@ -274,7 +285,7 @@ function updateViewHint(pts) {
 function stopLiveLoop() {
   clearInterval(liveTimer);
   liveTimer = null;
-  lastBall = null;
+  ballPrev = ballCurr = null;
   lastViewLabel = null;
   $('#viewHint').textContent = '';
   const overlay = $('#camOverlay');
@@ -535,7 +546,7 @@ function refreshAnalyzeButton() {
   const missing = PHASES.filter(p => !picks[p]);
   const ready = missing.length === 0 && !!serverInfo && !!sourceBlob;
   $('#btnAnalyze').disabled = !ready;
-  if (!serverInfo) msg('#analyzeMsg', 'Connect the analysis server first.', false);
+  if (!serverInfo) msg('#analyzeMsg', 'Waiting for the analysis server…', false);
   else if (missing.length) msg('#analyzeMsg', `Select ${missing.map(p => PHASE_LABEL[p]).join(', ')}.`, false);
   else msg('#analyzeMsg', '', false);
 }
