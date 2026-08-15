@@ -332,9 +332,21 @@ def _warnings(spec: AnalyseSpec, ctx, frames, per_phase) -> list[str]:
                 f"At your contact frame the nearest foot is {d:.2f} torso lengths "
                 "from the ball, so this may not be the moment of the strike. Every "
                 "contact metric assumes it is — worth re-picking.")
-    else:
-        out.append("No ball was tracked at contact, so ball-relative metrics were "
-                   "skipped. A clearer view of the ball improves this.")
+
+    # "Plant foot vs ball" is scored at both plant and contact; either one
+    # missing the ball just drops that one metric, not the phase — the rest of
+    # the score comes from pose alone. Named here so that is visible rather
+    # than left to be inferred from a quietly absent metric.
+    no_ball = [p for p in ("plant", "contact") if not frames[p]["ball"]]
+    if len(no_ball) == 2:
+        out.append("No ball was tracked at plant or contact, so the two "
+                   "ball-relative metrics were skipped — scoring ran on body "
+                   "position alone. A clearer view of the ball would add them "
+                   "back in; everything else here is unaffected.")
+    elif no_ball:
+        out.append(f"No ball was tracked at {PHASE_LABEL[no_ball[0]].lower()}, so "
+                   "that phase's 'plant foot vs ball' metric was skipped — the "
+                   "rest of its score comes from body position alone.")
 
     for p in PHASES:
         shifted = per_phase[p].get("shifted_ms", 0)
