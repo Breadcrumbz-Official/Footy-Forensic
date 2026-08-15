@@ -91,7 +91,17 @@ $('#serverUrl').addEventListener('keydown', e => {
 });
 // Re-check a remembered URL on load — an ngrok tunnel from a previous session
 // has usually died, and finding that out now beats finding out after recording.
-if (api.getServerUrl()) connect(api.getServerUrl(), { quiet: true });
+if (api.getServerUrl()) {
+  connect(api.getServerUrl(), { quiet: true });
+} else if (location.protocol !== 'file:') {
+  // Nothing remembered: the server may be serving this page itself, in which
+  // case the API is on this very origin and there is nothing to paste. Probe
+  // before connecting so a page served from a plain static host doesn't save a
+  // dead URL and then complain about it on every reload.
+  api.checkHealth(location.origin)
+     .then(() => connect(location.origin, { quiet: true }))
+     .catch(() => {});
+}
 
 /* ── Video input ────────────────────────────────────────────────────────── */
 

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+sfai_env/
+.venv/
+venv/
+
+# Node / Vite client
+ui/node_modules/
+ui/dist/
+
+# NOTE: server/models/ is deliberately committed (pre-cached, ~54MB) so a fresh
+# machine needs no internet on first run. models_cache.py downloads it if absent.
+
+# OS
+.DS_Store
+Thumbs.db

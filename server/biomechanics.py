@@ -141,8 +141,12 @@ class ViewQuality:
     label: str
 
     def as_dict(self) -> dict:
+        # shoulder_ratio is NaN when the torso was too degenerate to measure
+        # (see view_quality below). round() preserves NaN, and NaN is not valid
+        # JSON, so it becomes null here rather than killing the whole response.
+        ratio = self.shoulder_ratio
         return {"score": round(self.score, 3),
-                "shoulderRatio": round(self.shoulder_ratio, 3),
+                "shoulderRatio": round(ratio, 3) if math.isfinite(ratio) else None,
                 "label": self.label}
 
 

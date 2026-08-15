@@ -34,14 +34,26 @@ def probe(path: str) -> dict:
     if not cap.isOpened():
         raise VideoError("Could not open this video — the format may be unsupported.")
     try:
-        fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
-        count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # `x or 0.0` is not enough: OpenCV reports NaN for these on some
+        # containers (MediaRecorder WebM among them), and NaN is truthy, so it
+        # would pass straight through and later fail JSON encoding.
+        fps = _finite_or(cap.get(cv2.CAP_PROP_FPS), 0.0)
+        count = _finite_or(cap.get(cv2.CAP_PROP_FRAME_COUNT), 0.0)
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     finally:
         cap.release()
     duration = (count / fps) if fps > 0 and count > 0 else 0.0
     return {"fps": fps, "frames": int(count), "width": w, "height": h, "duration": duration}
+
+
+def _finite_or(value, default: float) -> float:
+    """OpenCV property reads come back as NaN or inf on some containers."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return v if math.isfinite(v) else default
 
 
 def _downscale(frame: np.ndarray) -> np.ndarray:
@@ -52,19 +64,61 @@ def _downscale(frame: np.ndarray) -> np.ndarray:
     return cv2.resize(frame, (round(w * k), round(h * k)), interpolation=cv2.INTER_AREA)
 
 
+def count_frames(path: str) -> int:
+    """Number of frames actually decodable from this file.
+
+    `grab()` advances without converting the frame to a numpy array, so this is
+    far cheaper than a real decode — worth paying to learn the true length of a
+    file whose metadata lies.
+    """
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise VideoError("Could not open this video — the format may be unsupported.")
+    n = 0
+    try:
+        while cap.grab():
+            n += 1
+    finally:
+        cap.release()
+    return n
+
+
 def extract_clips(path: str, windows: dict[str, tuple[float, float]],
-                  fallback_fps: float = 30.0) -> dict[str, list[dict]]:
+                  fallback_fps: float = 30.0,
+                  source_duration: float | None = None) -> dict[str, list[dict]]:
     """Pull the frames falling inside each named [start, end] window.
 
     Returns {name: [{"image": BGR ndarray, "time": seconds}, ...]} ordered by
     time. A window that captured nothing comes back as an empty list rather
     than raising, so one bad phase pick does not lose the other two.
+
+    `source_duration` is the length the BROWSER measured, and the requested
+    windows are points on that timeline. It matters because this function builds
+    its own timeline as `frame_index / fps`, and the two disagree whenever the
+    container's declared frame rate is not the rate it was actually captured at
+    — which is the normal case for MediaRecorder WebM, where the camera is free
+    to deliver frames irregularly while the header still claims a flat 30fps.
+    Twenty seconds of real footage then reads as fifteen here, every pick lands
+    earlier than the user intended, and picks near the end fall off the end of
+    the timeline entirely and return no frames at all.
+
+    Given the browser's duration we can sidestep the declared rate completely:
+    count the frames that actually decode, and lay them evenly across that
+    duration. That is exact for constant-rate video and much closer than the
+    header for variable-rate video.
     """
+    fps = 0.0
+    if source_duration and math.isfinite(source_duration) and source_duration > 0:
+        n = count_frames(path)
+        if n > 1:
+            fps = n / source_duration
+
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise VideoError("Could not open this video — the format may be unsupported.")
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    if not (fps > 0) or not math.isfinite(fps):
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
     if not (fps > 0) or not math.isfinite(fps):
         fps = fallback_fps
 

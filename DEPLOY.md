@@ -21,6 +21,10 @@ server/
 
 **Note on models/**: Don't copy the 54MB `models/` directory. The server downloads on first run if missing. If you want to pre-cache, copy `server/models/` over.
 
+**Note on the client**: also copy `ui/` (without `node_modules/`). The server
+serves the page from `ui/dist/`, so the target machine needs Node to build it —
+or build it locally and copy just `ui/dist/` across.
+
 ## Setup (5 min)
 
 ### 1. Create a Python 3.10+ virtualenv
@@ -73,13 +77,38 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8000
 First run: ~7–8 seconds (downloads + builds models).
 Subsequent runs: ~3–4 seconds.
 
-### Expose it to the browser
+### Build the browser client
+
+The server also serves the page, so build it once before starting:
+
+```bash
+cd ui
+npm install
+npm run build      # outputs ui/dist/
+```
+
+`main.py` mounts `ui/dist/` at `/`. Only that directory is exposed — `server/`
+and `models/` are never reachable over HTTP. Override the location with
+`SFAI_CLIENT_DIR` if you build elsewhere.
+
+### Expose it to users
 
 ```bash
 ngrok http 8000
 ```
 
-Copy the `https://...` URL from ngrok and paste it into the **Server URL** box on the browser page.
+Send people the `https://...` URL ngrok prints. That single URL serves both the
+page and the API, and the page talks to its own origin — there is nothing for a
+user to configure. On the free tier the hostname changes every time ngrok
+restarts; a free ngrok account gets you a fixed one via `--domain`.
+
+For local UI work, `cd ui && npm run dev` serves the page on :5173 with hot
+reload. That origin has no API behind it, so point it at the real server once
+from the browser console:
+
+```js
+localStorage.setItem('sfai.serverUrl', 'http://localhost:8000')
+```
 
 ## Environment Variables (optional)
 
@@ -118,7 +147,14 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8000
 → Model download timing out. Check internet, or `curl -v http://localhost:8000/health` to see the error.
 
 **Browser won't connect to ngrok URL**
-→ ngrok tunnel closed. Restart: `ngrok http 8000`. Paste new URL into Server URL box.
+→ ngrok tunnel closed. Restart: `ngrok http 8000` and share the new URL.
+
+**Page loads but says "ANALYSIS SERVER UNREACHABLE"**
+→ The page reached the server but `/health` did not answer. Check the uvicorn
+window is still running and `curl http://localhost:8000/health` returns JSON.
+
+**503 "No built client at ..."**
+→ `ui/dist/` is missing. Run `cd ui && npm install && npm run build`.
 
 **"You selected left-footed, but in these frames the right leg is the one swinging"**
 → This is correct! Footedness detection inferred wrong. The server is using your override anyway, as intended.

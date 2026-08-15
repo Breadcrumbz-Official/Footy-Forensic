@@ -346,10 +346,15 @@ def _score_metric(rule: dict, meas, view_score: float) -> dict:
     the camera is not side-on enough for that axis to mean anything.
     """
     fmt_v, fmt_r = FMT[rule["fmt"]]
+    # A degenerate frame yields NaN/inf here. The guard below already refuses to
+    # score those, but the raw value must not survive into the response either:
+    # NaN is not valid JSON and would fail the whole request at encode time.
+    raw = None if meas is None else meas["value"]
+    vis = 0.0 if meas is None else meas["vis"]
     out = {
         "id": rule["id"], "label": rule["label"], "weight": rule["weight"],
-        "value": None if meas is None else meas["value"],
-        "vis": 0.0 if meas is None else meas["vis"],
+        "value": raw if (raw is not None and _finite(raw)) else None,
+        "vis": vis if _finite(vis) else 0.0,
         "caveat": rule.get("caveat"),
         "ideal": list(rule["ideal"]),
         "idealText": fmt_r(*rule["ideal"]),
