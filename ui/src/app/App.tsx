@@ -1518,61 +1518,49 @@ export default function App() {
             </div>
           </div>
 
-          {/* Feedback */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Strengths */}
-            <div className="bg-card border border-border rounded-xl p-6">
-              <div className="flex items-center gap-2.5 mb-5">
-                <CheckCircle2 className="w-4 h-4 text-primary" />
-                <h3
-                  className="text-sm font-black tracking-widest text-foreground"
-                  style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
-                >
-                  WHAT WENT WELL
-                </h3>
-              </div>
-              {results.strengths.length === 0 ? (
-                <p className="text-sm text-muted-foreground leading-relaxed">
-                  Nothing scored in the top band this time. The improvements opposite are where to start.
-                </p>
-              ) : (
-                <ul className="space-y-3.5">
-                  {results.strengths.map((s, i) => (
-                    <li key={i} className="flex items-start gap-3">
-                      <div className="w-1.5 h-1.5 rounded-full bg-primary mt-2 shrink-0" />
-                      <span className="text-sm text-foreground leading-relaxed">{s}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+          {/* Feedback — one card per phase, not pooled, so a plant-phase note
+              and a follow-through note never blur into the same list. */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            {results.feedback.map((f) => (
+              <div key={f.key} className="bg-card border border-border rounded-xl p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: f.color }} />
+                  <h3
+                    className="text-xs font-black tracking-widest text-foreground"
+                    style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+                  >
+                    {f.label.toUpperCase()}
+                  </h3>
+                </div>
 
-            {/* Improvements */}
-            <div className="bg-card border border-border rounded-xl p-6">
-              <div className="flex items-center gap-2.5 mb-5">
-                <AlertCircle className="w-4 h-4 text-accent" />
-                <h3
-                  className="text-sm font-black tracking-widest text-foreground"
-                  style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
-                >
-                  WHAT TO IMPROVE
-                </h3>
+                {f.strengths.length === 0 && f.improvements.length === 0 ? (
+                  <p className="text-xs text-muted-foreground leading-relaxed">Nothing scorable here.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {f.strengths.length > 0 && (
+                      <ul className="space-y-2">
+                        {f.strengths.map((s, i) => (
+                          <li key={i} className="flex items-start gap-2">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-primary mt-0.5 shrink-0" />
+                            <span className="text-xs text-foreground leading-snug">{s}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {f.improvements.length > 0 && (
+                      <ul className="space-y-2">
+                        {f.improvements.map((s, i) => (
+                          <li key={i} className="flex items-start gap-2">
+                            <AlertCircle className="w-3.5 h-3.5 text-accent mt-0.5 shrink-0" />
+                            <span className="text-xs text-foreground leading-snug">{s}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
               </div>
-              {results.improvements.length === 0 ? (
-                <p className="text-sm text-muted-foreground leading-relaxed">
-                  Nothing fell below the good band in the metrics that could be measured.
-                </p>
-              ) : (
-                <ul className="space-y-3.5">
-                  {results.improvements.map((s, i) => (
-                    <li key={i} className="flex items-start gap-3">
-                      <div className="w-1.5 h-1.5 rounded-full bg-accent mt-2 shrink-0" />
-                      <span className="text-sm text-foreground leading-relaxed">{s}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+            ))}
           </div>
 
           {/* What this can and cannot measure */}

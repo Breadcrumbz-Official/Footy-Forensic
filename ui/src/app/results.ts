@@ -46,11 +46,22 @@ export interface DisplayPhase {
   ballFound: boolean;
 }
 
+/** Coaching text for one phase, kept separate from the next phase's rather
+ *  than pooled — a plant-phase fix and a follow-through fix are different
+ *  moments in the swing, and mixing them into one flat list buried which
+ *  phase each line was even about. */
+export interface PhaseFeedback {
+  key: PhaseKey;
+  label: string;
+  color: string;
+  strengths: string[];
+  improvements: string[];
+}
+
 export interface DisplayResults {
   overall: number | null;
   phases: DisplayPhase[];
-  strengths: string[];
-  improvements: string[];
+  feedback: PhaseFeedback[];
   warnings: string[];
   context: AnalysisResult['context'];
   timing: AnalysisResult['timing'];
@@ -109,32 +120,30 @@ function toDisplayMetric(m: Metric): DisplayMetric {
 }
 
 /**
- * Coaching text, taken verbatim from the server's rule set.
+ * Coaching text for one phase, taken verbatim from the server's rule set.
  *
  * Strengths are the metrics that scored well; improvements are the ones that
  * did not, worst first and weighted by how much the rule set cares about them,
  * so the top of the list is the thing most worth fixing. Unscored metrics
  * appear in neither — the server could not judge them, so nor can we.
  */
-function coaching(phases: Phase[]): { strengths: string[]; improvements: string[] } {
+function phaseCoaching(phase: Phase): { strengths: string[]; improvements: string[] } {
   const strengths: { text: string; rank: number }[] = [];
   const improvements: { text: string; rank: number }[] = [];
 
-  for (const phase of phases) {
-    for (const m of phase.metrics) {
-      const status = metricStatus(m);
-      const what = m.feedback?.what;
-      if (!what || status === 'unknown') continue;
+  for (const m of phase.metrics) {
+    const status = metricStatus(m);
+    const what = m.feedback?.what;
+    if (!what || status === 'unknown') continue;
 
-      if (status === 'good') {
-        strengths.push({ text: what, rank: (m.score ?? 0) * m.weight });
-      } else {
-        const tip = m.feedback?.tip;
-        improvements.push({
-          text: tip ? `${what} ${tip}` : what,
-          rank: (100 - (m.score ?? 0)) * m.weight,
-        });
-      }
+    if (status === 'good') {
+      strengths.push({ text: what, rank: (m.score ?? 0) * m.weight });
+    } else {
+      const tip = m.feedback?.tip;
+      improvements.push({
+        text: tip ? `${what} ${tip}` : what,
+        rank: (100 - (m.score ?? 0)) * m.weight,
+      });
     }
   }
 
@@ -165,10 +174,15 @@ export function toDisplay(result: AnalysisResult): DisplayResults {
     };
   });
 
+  const feedback: PhaseFeedback[] = PHASE_KEYS.map(key => {
+    const p = result.phases[key];
+    return { key, label: p.label, color: PHASE_COLOR[key], ...phaseCoaching(p) };
+  });
+
   return {
     overall: result.overall,
     phases,
-    ...coaching(PHASE_KEYS.map(k => result.phases[k])),
+    feedback,
     warnings: result.warnings ?? [],
     context: result.context,
     timing: result.timing,
