@@ -284,8 +284,19 @@ export default function App() {
    * Only the models an enabled option actually needs get loaded, and the whole
    * loop is torn down when every option is off — a phone should not be running
    * a pose graph to draw nothing. Pose is gated to ~30fps and the ball detector
-   * to ~5fps, which is what the previous client settled on: the ball moves far
-   * less between frames than the skeleton does, and it is the expensive one.
+   * to ~5fps (in practice slower — CPU object detection runs several times the
+   * cost of pose's GPU-driven tick), which is what the previous client settled
+   * on: the ball moves far less between frames than the skeleton does, and it
+   * is the expensive one.
+   *
+   * That gap between "a fresh pose every tick" and "a fresh ball every few
+   * hundred ms" is not closeable by asking the model for more frames — the
+   * fix is to not need more of them. Rather than redraw the last detection
+   * frozen in place (a hold-then-jump next to the buttery skeleton), each tick
+   * extrapolates the ball along its last known velocity, the same
+   * dead-reckoning trick video game netcode uses to hide a sparse, laggy
+   * signal. ballPrev/ballCurr are the two most recent real detections;
+   * getSmoothedBall projects forward from them.
    */
   useEffect(() => {
     const canvas = camOverlayRef.current;
@@ -300,7 +311,24 @@ export default function App() {
     let lastPoseAt = 0;
     let lastBallAt = 0;
     let pts: live.Pt[] | null = null;
-    let ball: live.Ball | null = null;
+    // {x, y, r, t} — the two most recent real ball detections, for velocity.
+    let ballPrev: (live.Ball & { t: number }) | null = null;
+    let ballCurr: (live.Ball & { t: number }) | null = null;
+    const BALL_EXTRAPOLATE_MAX_MS = 350; // stop projecting motion past this —
+                                          // a ball unseen this long is not
+                                          // still traveling in a straight
+                                          // line; hold position instead
+
+    const getSmoothedBall = (now: number): live.Ball | null => {
+      if (!ballCurr) return null;
+      if (!ballPrev) return ballCurr;
+      const dt = ballCurr.t - ballPrev.t;
+      const elapsed = now - ballCurr.t;
+      if (dt <= 0 || elapsed < 0 || elapsed > BALL_EXTRAPOLATE_MAX_MS) return ballCurr;
+      const vx = (ballCurr.x - ballPrev.x) / dt;
+      const vy = (ballCurr.y - ballPrev.y) / dt;
+      return { x: ballCurr.x + vx * elapsed, y: ballCurr.y + vy * elapsed, r: ballCurr.r, score: ballCurr.score };
+    };
 
     (async () => {
       try {
@@ -338,13 +366,17 @@ export default function App() {
         }
         if (showBall && now - lastBallAt > 200) {
           lastBallAt = now;
-          ball = live.detectBallLive(v, pts ? live.torsoScale(pts) : 0);
+          const b = live.detectBallLive(v, pts ? live.torsoScale(pts) : 0);
+          if (b) { ballPrev = ballCurr; ballCurr = { ...b, t: now }; }
+          // A real miss (ball genuinely gone, per detectBallLive's own forget
+          // logic) — stop extrapolating rather than fly a phantom ring onward.
+          else { ballPrev = ballCurr = null; }
         }
 
         live.drawOverlay(c, (showSkeleton || showAngles) ? pts : null, {
           skeleton: showSkeleton,
           angles: showAngles,
-          ball: showBall ? ball : null,
+          ball: showBall ? getSmoothedBall(now) : null,
           // The front camera preview is mirrored for the user, so the overlay
           // has to be mirrored to sit on top of what they are looking at.
           mirrored: facing === "user",
@@ -855,6 +887,14 @@ export default function App() {
               <p className="text-xs text-muted-foreground mt-3 leading-relaxed">
                 Prop the phone side-on to the ball, level with it, whole body in frame. Recording stops
                 automatically at {REC_LIMIT_MS / 1000} seconds — you only need the run-up and the strike.
+              </p>
+              <p className="text-xs text-muted-foreground mt-2 leading-relaxed">
+                <span className="text-foreground font-semibold">For a clean ball read:</span> keep the whole
+                ball in frame and unobstructed at your plant and contact moments, film with even light (no
+                strong backlight or deep shadow over it), and stand close enough that the ball reads as
+                roughly a fifth to a full torso-width across — a speck in a wide shot won't register.
+                None of this is required — the score still runs on body position alone if the ball
+                isn't found — but a clean read adds the plant-foot-vs-ball metric back in.
               </p>
             </div>
           )}
