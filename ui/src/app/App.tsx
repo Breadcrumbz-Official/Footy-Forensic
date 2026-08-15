@@ -1,0 +1,1592 @@
+import { useState, useRef, useCallback, useEffect, useLayoutEffect } from "react";
+import {
+  Upload, Camera, ChevronRight, ChevronLeft, CheckCircle2, RotateCcw,
+  Play, Pause, Zap, AlertCircle, TrendingUp, AlertTriangle,
+  Info, SwitchCamera, Square, X
+} from "lucide-react";
+
+import * as api from "./api";
+import type { AnalyseSpec, PhaseKey } from "./api";
+import { PHASE_KEYS } from "./api";
+import {
+  toDisplay, scoreColor, PHASE_COLOR, PHASE_SHORT, PHASE_HINT,
+} from "./results";
+import type { DisplayMetric, DisplayResults } from "./results";
+import { Recorder, ensureFiniteDuration, REC_LIMIT_MS, REC_MIN_MS } from "./recorder";
+import { ReelScrubber } from "./ReelScrubber";
+import type { ReelMarker } from "./ReelScrubber";
+import { Toggle } from "./Toggle";
+import * as live from "./liveOverlay";
+
+type Step = "upload" | "select" | "analyzing" | "results";
+
+/** Default capture window the reel slides over the video. The server cuts the
+ *  clip to exactly this span and analyses its midpoint. Adjustable per phase —
+ *  a longer window gives the pose model more frames to find a clean one in, at
+ *  the cost of the pick being less specific. */
+const WINDOW_DEFAULT = 0.2;
+const WINDOW_MIN = 0.08;
+const WINDOW_MAX = 1.0;
+const WINDOW_STEP = 0.02;
+
+const SEGMENT_CONFIG: { key: PhaseKey; label: string; color: string; shortLabel: string }[] = [
+  { key: "plant", label: "Plant Foot", shortLabel: PHASE_SHORT.plant, color: PHASE_COLOR.plant },
+  { key: "contact", label: "Ball Contact", shortLabel: PHASE_SHORT.contact, color: PHASE_COLOR.contact },
+  { key: "followThrough", label: "Follow Through", shortLabel: PHASE_SHORT.followThrough, color: PHASE_COLOR.followThrough },
+];
+
+function ScoreRing({ score, size = 96, stroke = 7, color }: { score: number; size?: number; stroke?: number; color: string }) {
+  const r = (size - stroke * 2) / 2;
+  const circ = 2 * Math.PI * r;
+  const offset = circ * (1 - score / 100);
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="-rotate-90">
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={stroke} />
+      <circle
+        cx={size / 2} cy={size / 2} r={r}
+        fill="none" stroke={color} strokeWidth={stroke}
+        strokeLinecap="round"
+        strokeDasharray={circ}
+        strokeDashoffset={offset}
+        style={{ transition: "stroke-dashoffset 1s ease-out" }}
+      />
+    </svg>
+  );
+}
+
+function getStatusDot(status: DisplayMetric["status"]) {
+  if (status === "good") return "bg-[#00df54]";
+  if (status === "warn") return "bg-[#ffb800]";
+  if (status === "bad") return "bg-[#e03c3c]";
+  return "bg-muted-foreground/40";
+}
+
+const PX_PER_SECOND = 130;
+
+export default function App() {
+  const [step, setStep] = useState<Step>("upload");
+  const [videoUrl, setVideoUrl] = useState("");
+  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(8);
+  const [footedness, setFootedness] = useState<AnalyseSpec["footedness"]>("auto");
+  const [sourceFps, setSourceFps] = useState(30);
+
+  const [uploadPct, setUploadPct] = useState(0);
+  const [stage, setStage] = useState<"upload" | "analyze">("upload");
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<DisplayResults | null>(null);
+
+  const [selectPage, setSelectPage] = useState(0);
+  const [segments, setSegments] = useState<Record<PhaseKey, number>>({
+    plant: 1.4,
+    contact: 3.2,
+    followThrough: 5.6,
+  });
+  const [expandedPhase, setExpandedPhase] = useState<PhaseKey | null>(null);
+  const [thumbnails, setThumbnails] = useState<string[]>([]);
+  const [thumbsLoading, setThumbsLoading] = useState(false);
+  // Per-phase capture window length, and which phases the user has actually
+  // touched — an untouched phase still shows its default guess, but is not
+  // drawn on the reel as though it were a deliberate pick.
+  const [windows, setWindows] = useState<Record<PhaseKey, number>>({
+    plant: WINDOW_DEFAULT, contact: WINDOW_DEFAULT, followThrough: WINDOW_DEFAULT,
+  });
+  const [touched, setTouched] = useState<Record<PhaseKey, boolean>>({
+    plant: false, contact: false, followThrough: false,
+  });
+  const [reelWidth, setReelWidth] = useState(0);
+
+  // Server identity, so the upload screen can say whether analysis is actually
+  // available before the person records anything.
+  const [health, setHealth] = useState<api.Health | null>(null);
+  const [healthError, setHealthError] = useState<string | null>(null);
+
+  // Live recording
+  const [camOpen, setCamOpen] = useState(false);
+  const [camReady, setCamReady] = useState(false);
+  const [camError, setCamError] = useState<string | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [facing, setFacing] = useState<"environment" | "user">("environment");
+
+  // Live overlay options. Each is independent: the detectors are only loaded
+  // when something that needs them is switched on.
+  const [showSkeleton, setShowSkeleton] = useState(false);
+  const [showAngles, setShowAngles] = useState(false);
+  const [showBall, setShowBall] = useState(false);
+  const [engineNote, setEngineNote] = useState<string | null>(null);
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const thumbVideoRef = useRef<HTMLVideoElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const thumbsExtractedFor = useRef<string>("");
+  const camPreviewRef = useRef<HTMLVideoElement>(null);
+  const camOverlayRef = useRef<HTMLCanvasElement>(null);
+  const recorderRef = useRef<Recorder | null>(null);
+  const seekRaf = useRef<number | null>(null);
+  const pendingSeek = useRef<number | null>(null);
+  // Releasing the camera stops the MediaRecorder, which resolves the in-flight
+  // start() promise with whatever was captured. Without this flag, closing the
+  // panel mid-take would submit the partial clip as if the user had finished.
+  const cancelledRef = useRef(false);
+
+  useEffect(() => {
+    api.checkHealth()
+      .then(h => { setHealth(h); setHealthError(null); })
+      .catch(err => setHealthError(err.message));
+  }, []);
+
+  /**
+   * Accept a video and move to the picking step.
+   *
+   * `fps` is only a fallback: server/video.py uses the container's own frame
+   * rate and reaches for this when the file does not report one — which is
+   * exactly the case for MediaRecorder WebM. Passing the camera's real capture
+   * rate keeps the server's frame timeline aligned with the times the reel
+   * scrubber produced.
+   */
+  const handleFile = useCallback((file: File, fps = 30) => {
+    if (!file.type.startsWith("video/")) return;
+    setSourceFps(fps);
+    // Uploading while the camera panel is open would leave the stream live
+    // behind an unmounted panel, and the browser's "recording" indicator with
+    // it. Done through the ref so this stays independent of hook ordering.
+    cancelledRef.current = true;
+    recorderRef.current?.release();
+    recorderRef.current = null;
+    setCamOpen(false);
+    setCamReady(false);
+
+    const url = URL.createObjectURL(file);
+    setVideoFile(file);
+    setVideoUrl(url);
+    setError(null);
+    setStep("select");
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) handleFile(file);
+  }, [handleFile]);
+
+  /* ── Live recording ──────────────────────────────────────────────────── */
+
+  const releaseCamera = useCallback(() => {
+    recorderRef.current?.release();
+    recorderRef.current = null;
+    if (camPreviewRef.current) camPreviewRef.current.srcObject = null;
+    setCamReady(false);
+    setIsRecording(false);
+    setElapsed(0);
+  }, []);
+
+  // The camera keeps running (and the tab keeps showing "recording") until the
+  // tracks are stopped, so tear it down whenever this component goes away.
+  useEffect(() => () => {
+    cancelledRef.current = true;
+    releaseCamera();
+  }, [releaseCamera]);
+
+  const openCamera = useCallback(async () => {
+    setCamError(null);
+    setCamOpen(true);
+    if (!Recorder.supported()) {
+      setCamError("This browser cannot record video. Upload a file instead.");
+      return;
+    }
+    // getUserMedia is gated on a secure context. https and localhost qualify;
+    // a plain-http LAN address does not, and the failure is otherwise cryptic.
+    if (!window.isSecureContext) {
+      setCamError(
+        "Recording needs a secure connection. Open this page over https (or on localhost) to use the camera.");
+      return;
+    }
+    try {
+      const rec = recorderRef.current ?? new Recorder();
+      recorderRef.current = rec;
+      // The <video> mounts in the same render that opened the panel, so wait a
+      // frame for the ref to exist before handing it a stream.
+      await new Promise(requestAnimationFrame);
+      if (!camPreviewRef.current) return;
+      await rec.enableCamera(camPreviewRef.current);
+      setCamReady(true);
+    } catch (err) {
+      const e = err as Error;
+      setCamError(
+        e.name === "NotAllowedError"
+          ? "Camera permission was denied. Allow access in your browser's site settings and try again."
+          : e.name === "NotFoundError"
+            ? "No camera found on this device."
+            : `Could not start the camera. ${e.message}`);
+    }
+  }, []);
+
+  const closeCamera = useCallback(() => {
+    cancelledRef.current = true;   // discard anything captured so far
+    releaseCamera();
+    setCamOpen(false);
+    setCamError(null);
+  }, [releaseCamera]);
+
+  const flipCamera = useCallback(async () => {
+    if (!recorderRef.current || !camPreviewRef.current || isRecording) return;
+    try {
+      setFacing(await recorderRef.current.switchCamera(camPreviewRef.current));
+      setCamError(null);
+    } catch {
+      setCamError("This device has only one camera.");
+    }
+  }, [isRecording]);
+
+  const startRecording = useCallback(async () => {
+    const rec = recorderRef.current;
+    if (!rec || isRecording) return;
+    setCamError(null);
+    setIsRecording(true);
+    setElapsed(0);
+    cancelledRef.current = false;
+    // Read the capture rate off the live track before the stream is torn down.
+    const trackFps = rec.stream?.getVideoTracks()[0]?.getSettings().frameRate;
+    const fps = Number.isFinite(trackFps) && (trackFps as number) > 0 ? (trackFps as number) : 30;
+    try {
+      // Resolves when the user stops or the hard cap fires.
+      const blob = await rec.start(setElapsed);
+      setIsRecording(false);
+      if (cancelledRef.current) return;   // panel was closed mid-take
+      releaseCamera();
+      setCamOpen(false);
+      // The server keys off the filename extension when writing its temp file,
+      // so name it after the container MediaRecorder actually produced.
+      const ext = blob.type.includes("mp4") ? "mp4" : "webm";
+      handleFile(new File([blob], `kick.${ext}`, { type: blob.type || "video/webm" }), fps);
+    } catch (err) {
+      setIsRecording(false);
+      setCamError((err as Error).message);
+    }
+  }, [isRecording, releaseCamera, handleFile]);
+
+  const stopRecording = useCallback(() => {
+    recorderRef.current?.stop();
+  }, []);
+
+  /* ── Live overlay ────────────────────────────────────────────────────── */
+
+  const overlayOn = showSkeleton || showAngles || showBall;
+
+  /**
+   * Detection loop for the preview overlay.
+   *
+   * Only the models an enabled option actually needs get loaded, and the whole
+   * loop is torn down when every option is off — a phone should not be running
+   * a pose graph to draw nothing. Pose is gated to ~30fps and the ball detector
+   * to ~5fps, which is what the previous client settled on: the ball moves far
+   * less between frames than the skeleton does, and it is the expensive one.
+   */
+  useEffect(() => {
+    const canvas = camOverlayRef.current;
+    if (!camOpen || !camReady || !overlayOn) {
+      const g = canvas?.getContext("2d");
+      if (canvas && g) g.clearRect(0, 0, canvas.width, canvas.height);
+      return;
+    }
+
+    let cancelled = false;
+    let raf = 0;
+    let lastPoseAt = 0;
+    let lastBallAt = 0;
+    let pts: live.Pt[] | null = null;
+    let ball: live.Ball | null = null;
+
+    (async () => {
+      try {
+        setEngineNote("Loading detection models…");
+        await Promise.all([
+          (showSkeleton || showAngles) ? live.initPose() : Promise.resolve(),
+          showBall ? live.initBall() : Promise.resolve(),
+        ]);
+        if (cancelled) return;
+        live.resetLiveClocks();
+        setEngineNote(null);
+      } catch (err) {
+        if (!cancelled) {
+          setEngineNote(`Live overlay unavailable: ${(err as Error).message}. Recording still works.`);
+        }
+        return;
+      }
+
+      const loop = () => {
+        if (cancelled) return;
+        raf = requestAnimationFrame(loop);
+
+        const v = camPreviewRef.current;
+        const c = camOverlayRef.current;
+        if (!v || !c || !v.videoWidth) return;
+        if (c.width !== v.videoWidth || c.height !== v.videoHeight) {
+          c.width = v.videoWidth;
+          c.height = v.videoHeight;
+        }
+
+        const now = performance.now();
+        if ((showSkeleton || showAngles) && now - lastPoseAt > 33) {
+          lastPoseAt = now;
+          pts = live.detectPoseLive(v);
+        }
+        if (showBall && now - lastBallAt > 200) {
+          lastBallAt = now;
+          ball = live.detectBallLive(v, pts ? live.torsoScale(pts) : 0);
+        }
+
+        live.drawOverlay(c, (showSkeleton || showAngles) ? pts : null, {
+          skeleton: showSkeleton,
+          angles: showAngles,
+          ball: showBall ? ball : null,
+          // The front camera preview is mirrored for the user, so the overlay
+          // has to be mirrored to sit on top of what they are looking at.
+          mirrored: facing === "user",
+        });
+      };
+      loop();
+    })();
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [camOpen, camReady, overlayOn, showSkeleton, showAngles, showBall, facing]);
+
+  // Free the wasm/GPU resources once the camera is gone for good.
+  useEffect(() => () => live.closeLive(), []);
+
+  const togglePlay = () => {
+    if (!videoRef.current) return;
+    if (isPlaying) videoRef.current.pause();
+    else videoRef.current.play();
+    setIsPlaying(!isPlaying);
+  };
+
+  const activeKey = SEGMENT_CONFIG[selectPage].key;
+  const activeWindow = windows[activeKey];
+
+  // Every phase's window, so the reel can keep the ones already set visible
+  // while you work on the next one.
+  const reelMarkers: ReelMarker[] = SEGMENT_CONFIG.map(seg => ({
+    key: seg.key,
+    label: seg.shortLabel,
+    color: seg.color,
+    start: segments[seg.key],
+    end: segments[seg.key] + windows[seg.key],
+    active: seg.key === activeKey,
+    set: touched[seg.key],
+  }));
+
+  /**
+   * Drive the reel from playback.
+   *
+   * `timeupdate` only fires about four times a second, which is far too coarse
+   * for the film to look like it is following the video. A rAF loop while
+   * playing keeps the marker locked to the playhead, and the filmstrip images
+   * are memoised so this costs a cheap re-render rather than relaying 90
+   * thumbnails per frame.
+   */
+  useEffect(() => {
+    if (!isPlaying) return;
+    let raf = 0;
+    const tick = () => {
+      const v = videoRef.current;
+      if (v) {
+        setCurrentTime(v.currentTime);
+        // Wherever you pause is your pick: playback and dragging move the same
+        // cursor, so the window under the marker is always what is selected.
+        const t = Math.min(v.currentTime, Math.max(0, duration - activeWindow));
+        setSegments(prev => (Math.abs(prev[activeKey] - t) < 1e-3 ? prev : { ...prev, [activeKey]: t }));
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [isPlaying, activeKey, activeWindow, duration]);
+
+  const handleTimeUpdate = () => {
+    if (videoRef.current && !isPlaying) setCurrentTime(videoRef.current.currentTime);
+  };
+
+  // A clip straight out of MediaRecorder reports duration Infinity until it is
+  // coaxed out of the file, so every duration read goes through this.
+  const handleLoadedMetadata = async () => {
+    if (!videoRef.current) return;
+    const d = await ensureFiniteDuration(videoRef.current);
+    if (!Number.isFinite(d) || d <= 0) return;
+    setDuration(d);
+    setSegments({
+      plant: d * 0.18,
+      contact: d * 0.42,
+      followThrough: d * 0.70,
+    });
+  };
+
+  const handleThumbVideoLoaded = async () => {
+    const el = thumbVideoRef.current;
+    if (!el) return;
+    // Fall back to the visible player's duration: this element is kept out of
+    // sight, and a browser will not always coax a real duration out of a
+    // MediaRecorder file on one it is not showing.
+    const own = await ensureFiniteDuration(el);
+    const d = Number.isFinite(own) && own > 0 ? own : duration;
+    extractThumbnails(d);
+  };
+
+  /**
+   * Seek the preview to `t`, at most once per animation frame.
+   *
+   * Dragging the reel emits scroll events far faster than a <video> can decode,
+   * and assigning currentTime on every one queues seeks the element then works
+   * through one at a time — which is what made scrubbing feel laggy. Keeping
+   * only the newest target and issuing it when the element is idle means the
+   * picture tracks the finger instead of trailing several hundred ms behind.
+   */
+  const seekTo = useCallback((t: number) => {
+    setCurrentTime(t);
+    pendingSeek.current = t;
+    if (seekRaf.current !== null) return;
+    const pump = () => {
+      const v = videoRef.current;
+      const target = pendingSeek.current;
+      if (!v || target === null) { seekRaf.current = null; return; }
+      if (v.seeking) { seekRaf.current = requestAnimationFrame(pump); return; }
+      pendingSeek.current = null;
+      seekRaf.current = null;
+      // fastSeek jumps to the nearest keyframe without the exactness guarantee,
+      // which is what we want while dragging; the server re-cuts the clip from
+      // the original anyway, so the preview only has to look right.
+      if (typeof v.fastSeek === "function") v.fastSeek(target);
+      else v.currentTime = target;
+    };
+    seekRaf.current = requestAnimationFrame(pump);
+  }, []);
+
+  useEffect(() => () => {
+    if (seekRaf.current !== null) cancelAnimationFrame(seekRaf.current);
+  }, []);
+
+  // Seek a (hidden) video element and resolve once the frame is actually ready.
+  const seekAndWait = (video: HTMLVideoElement, t: number) =>
+    new Promise<void>((resolve) => {
+      const onSeeked = () => {
+        video.removeEventListener("seeked", onSeeked);
+        resolve();
+      };
+      video.addEventListener("seeked", onSeeked);
+      video.currentTime = t;
+    });
+
+  // Build the horizontal filmstrip of real frames used by the reel scrubber,
+  // pulled from an offscreen video element so it never disturbs the visible
+  // preview above.
+  const extractThumbnails = useCallback(async (d: number) => {
+    const video = thumbVideoRef.current;
+    if (!video || !Number.isFinite(d) || d <= 0) return;
+    if (thumbsExtractedFor.current === videoUrl) return;
+    thumbsExtractedFor.current = videoUrl;
+
+    setThumbsLoading(true);
+    const count = Math.min(90, Math.max(24, Math.round(d * 6)));
+    const aspect = (video.videoWidth && video.videoHeight) ? video.videoWidth / video.videoHeight : 16 / 9;
+    const canvas = document.createElement("canvas");
+    canvas.height = 160;
+    canvas.width = Math.round(160 * aspect);
+    const ctx = canvas.getContext("2d");
+    const frames: string[] = new Array(count).fill("");
+    setThumbnails([...frames]);
+
+    try {
+      for (let i = 0; i < count; i++) {
+        const t = (d * i) / (count - 1);
+        await seekAndWait(video, Math.min(t, Math.max(0, d - 0.01)));
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          frames[i] = canvas.toDataURL("image/jpeg", 0.6);
+        }
+        setThumbnails([...frames]);
+      }
+    } finally {
+      setThumbsLoading(false);
+    }
+  }, [videoUrl]);
+
+  /**
+   * Send the video and the three windows to the server and show what comes
+   * back. The reel gives us the START of each capture window, so the clip is
+   * [t, t + WINDOW_SECONDS] and the instant analysed is its midpoint.
+   */
+  const startAnalysis = async () => {
+    if (!videoFile) return;
+    setStep("analyzing");
+    setStage("upload");
+    setUploadPct(0);
+    setError(null);
+
+    const spec: AnalyseSpec = {
+      phases: {
+        plant: { time: 0, clip: { start: 0, end: 0 } },
+        contact: { time: 0, clip: { start: 0, end: 0 } },
+        followThrough: { time: 0, clip: { start: 0, end: 0 } },
+      },
+      fps: sourceFps,
+      footedness,
+      duration,
+    };
+    for (const key of PHASE_KEYS) {
+      const start = Math.max(0, Math.min(segments[key], Math.max(0, duration - windows[key])));
+      const end = Math.min(start + windows[key], duration);
+      spec.phases[key] = { time: (start + end) / 2, clip: { start, end } };
+    }
+
+    try {
+      const raw = await api.analyze(videoFile, spec, (pct, which) => {
+        setStage(which);
+        if (which === "upload") setUploadPct(pct);
+      });
+      setResults(toDisplay(raw));
+      setStep("results");
+    } catch (err) {
+      setError((err as Error).message);
+      setStep("select");
+    }
+  };
+
+  const reset = () => {
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    setVideoUrl("");
+    setVideoFile(null);
+    setStep("upload");
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(8);
+    setSelectPage(0);
+    setExpandedPhase(null);
+    setThumbnails([]);
+    setThumbsLoading(false);
+    setTouched({ plant: false, contact: false, followThrough: false });
+    setWindows({ plant: WINDOW_DEFAULT, contact: WINDOW_DEFAULT, followThrough: WINDOW_DEFAULT });
+    setResults(null);
+    setError(null);
+    setUploadPct(0);
+    setCamOpen(false);
+    setCamError(null);
+    releaseCamera();
+    thumbsExtractedFor.current = "";
+  };
+
+  const fmt = (t: number) => {
+    const s = Math.floor(t);
+    const cs = Math.floor((t - s) * 100);
+    return `${s}.${cs.toString().padStart(2, "0")}s`;
+  };
+
+  return (
+    <div
+      className="min-h-screen bg-background text-foreground"
+      style={{ fontFamily: "'Inter', sans-serif" }}
+    >
+      {/* ── STEP 1: Upload ── */}
+      {step === "upload" && (
+        <div className="max-w-5xl mx-auto px-6">
+          {/* Hero */}
+          <div className="pt-20 pb-16 text-center">
+            <div className="inline-flex items-center gap-2 text-[11px] font-medium tracking-widest text-primary border border-primary/25 px-3 py-1.5 rounded-full mb-8"
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+              <Zap className="w-3 h-3" />
+              MEDIAPIPE POSE LANDMARKER · 33 KEYPOINTS
+            </div>
+            <h1
+              className="text-foreground leading-none mb-6"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "clamp(3rem, 10vw, 7rem)", fontWeight: 900, letterSpacing: "-0.01em" }}
+            >
+              PERFECT<br />
+              <span className="text-primary">YOUR SHOT</span>
+            </h1>
+            <p className="text-muted-foreground text-lg max-w-lg mx-auto leading-relaxed">
+              Upload a short video, mark your plant, contact, and follow-through moments.
+              Your kick is measured against a biomechanical rule set and scored.
+            </p>
+          </div>
+
+          {/* Server status — say plainly whether analysis is available. */}
+          <div className="mb-6 flex items-center justify-center">
+            {health ? (
+              <span
+                className="inline-flex items-center gap-2 text-[11px] tracking-widest text-muted-foreground border border-border px-3 py-1.5 rounded-full"
+                style={{ fontFamily: "'JetBrains Mono', monospace" }}
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-[#00df54]" />
+                ANALYSIS SERVER READY · {health.workers} WORKERS · MAX {health.maxUploadMb}MB
+              </span>
+            ) : (
+              <span
+                className="inline-flex items-center gap-2 text-[11px] tracking-widest text-[#e03c3c] border border-[#e03c3c]/30 px-3 py-1.5 rounded-full"
+                style={{ fontFamily: "'JetBrains Mono', monospace" }}
+              >
+                <AlertTriangle className="w-3 h-3" />
+                {healthError ? "ANALYSIS SERVER UNREACHABLE" : "CHECKING SERVER…"}
+              </span>
+            )}
+          </div>
+
+          {/* Upload cards */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+            <div
+              className={`relative border-2 border-dashed rounded-xl p-10 flex flex-col items-center gap-5 cursor-pointer transition-all duration-200 ${
+                isDragging
+                  ? "border-primary bg-primary/8"
+                  : "border-border hover:border-primary/40 hover:bg-card"
+              }`}
+              onDrop={handleDrop}
+              onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+              onDragLeave={() => setIsDragging(false)}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <div className={`w-14 h-14 rounded-full border flex items-center justify-center transition-colors ${
+                isDragging ? "border-primary bg-primary/10" : "border-border bg-muted"
+              }`}>
+                <Upload className={`w-6 h-6 ${isDragging ? "text-primary" : "text-muted-foreground"}`} />
+              </div>
+              <div className="text-center">
+                <p className="font-semibold text-foreground mb-1">Drop video file</p>
+                <p className="text-sm text-muted-foreground">or click to browse your files</p>
+              </div>
+              <span
+                className="text-[11px] text-muted-foreground bg-muted px-3 py-1 rounded-full tracking-widest"
+                style={{ fontFamily: "'JetBrains Mono', monospace" }}
+              >
+                MP4 · MOV · AVI · MAX {health?.maxUploadMb ?? 200}MB
+              </span>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="video/*"
+                className="hidden"
+                onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+              />
+            </div>
+
+            <div
+              className="border-2 border-dashed border-border rounded-xl p-10 flex flex-col items-center gap-5 cursor-pointer transition-all duration-200 hover:border-primary/40 hover:bg-card"
+              onClick={openCamera}
+            >
+              <div className="w-14 h-14 rounded-full border border-border bg-muted flex items-center justify-center">
+                <Camera className="w-6 h-6 text-muted-foreground" />
+              </div>
+              <div className="text-center">
+                <p className="font-semibold text-foreground mb-1">Record live</p>
+                <p className="text-sm text-muted-foreground">Use your device camera directly</p>
+              </div>
+              <span
+                className="text-[11px] text-muted-foreground bg-muted px-3 py-1 rounded-full tracking-widest"
+                style={{ fontFamily: "'JetBrains Mono', monospace" }}
+              >
+                AUTO-STOP {REC_LIMIT_MS / 1000}s
+              </span>
+            </div>
+          </div>
+
+          {/* Camera panel — only mounted while open, so the stream is never
+              live behind a closed UI. */}
+          {camOpen && (
+            <div className="bg-card border border-border rounded-xl p-5 mb-6">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2.5">
+                  <div className={`w-2.5 h-2.5 rounded-full ${isRecording ? "bg-[#e03c3c] animate-pulse" : "bg-muted-foreground/40"}`} />
+                  <span
+                    className="font-black text-sm tracking-wider text-foreground"
+                    style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+                  >
+                    {isRecording ? "RECORDING" : "CAMERA"}
+                  </span>
+                </div>
+                <button
+                  onClick={closeCamera}
+                  className="text-muted-foreground hover:text-foreground transition-colors"
+                  aria-label="Close camera"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {camError && (
+                <div className="flex items-start gap-2.5 border border-[#e03c3c]/40 bg-[#e03c3c]/8 rounded-lg p-3 mb-4">
+                  <AlertTriangle className="w-4 h-4 text-[#e03c3c] mt-0.5 shrink-0" />
+                  <p className="text-xs text-muted-foreground leading-relaxed">{camError}</p>
+                </div>
+              )}
+
+              <div className="relative aspect-video bg-black rounded-lg overflow-hidden mb-4">
+                <video
+                  ref={camPreviewRef}
+                  className="w-full h-full object-contain"
+                  style={{ transform: facing === "user" ? "scaleX(-1)" : undefined }}
+                  playsInline
+                  muted
+                  autoPlay
+                />
+                {/* Transparent overlay, sized to the camera's intrinsic frame
+                    and laid over the preview with the same object-contain box
+                    so the drawing lines up at any aspect ratio. */}
+                <canvas
+                  ref={camOverlayRef}
+                  className="absolute inset-0 w-full h-full pointer-events-none"
+                  style={{ objectFit: "contain" }}
+                />
+                {isRecording && (
+                  <>
+                    <div
+                      className="absolute top-3 left-3 flex items-center gap-2 bg-black/70 px-2.5 py-1 rounded text-white text-[11px]"
+                      style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#e03c3c] animate-pulse" />
+                      {elapsed.toFixed(1)}s / {REC_LIMIT_MS / 1000}s
+                    </div>
+                    <div className="absolute bottom-0 left-0 right-0 h-1 bg-white/10">
+                      <div
+                        className="h-1 bg-[#e03c3c] transition-all duration-100"
+                        style={{ width: `${Math.min(100, (elapsed * 1000 / REC_LIMIT_MS) * 100)}%` }}
+                      />
+                    </div>
+                  </>
+                )}
+                {!camReady && !camError && (
+                  <div className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">
+                    Starting camera…
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-3">
+                {!isRecording ? (
+                  <button
+                    onClick={startRecording}
+                    disabled={!camReady}
+                    className="flex-1 bg-primary text-primary-foreground font-black text-base tracking-widest py-3.5 rounded-xl flex items-center justify-center gap-2.5 hover:bg-primary/90 active:scale-[0.98] disabled:opacity-40 disabled:pointer-events-none transition-all"
+                    style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+                  >
+                    <Camera className="w-5 h-5" />
+                    START RECORDING
+                  </button>
+                ) : (
+                  <button
+                    onClick={stopRecording}
+                    disabled={elapsed * 1000 < REC_MIN_MS}
+                    className="flex-1 bg-[#e03c3c] text-white font-black text-base tracking-widest py-3.5 rounded-xl flex items-center justify-center gap-2.5 hover:bg-[#e03c3c]/90 active:scale-[0.98] disabled:opacity-40 disabled:pointer-events-none transition-all"
+                    style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+                  >
+                    <Square className="w-4 h-4" />
+                    {elapsed * 1000 < REC_MIN_MS
+                      ? `KEEP GOING… ${((REC_MIN_MS - elapsed * 1000) / 1000).toFixed(1)}s`
+                      : "STOP"}
+                  </button>
+                )}
+                <button
+                  onClick={flipCamera}
+                  disabled={!camReady || isRecording}
+                  className="border border-border text-muted-foreground hover:text-foreground px-4 py-3.5 rounded-xl disabled:opacity-30 disabled:pointer-events-none transition-colors"
+                  aria-label="Flip camera"
+                  title="Flip camera"
+                >
+                  <SwitchCamera className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Live overlay options */}
+              <div className="mt-5 pt-4 border-t border-border">
+                <div className="flex items-center justify-between mb-3">
+                  <span
+                    className="text-[11px] font-black tracking-widest text-muted-foreground"
+                    style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+                  >
+                    LIVE PREVIEW OVERLAY
+                  </span>
+                  {engineNote && (
+                    <span className="text-[10px] text-muted-foreground flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+                      {engineNote}
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <Toggle
+                    label="Skeleton"
+                    hint="33 pose landmarks, drawn live"
+                    checked={showSkeleton}
+                    onChange={setShowSkeleton}
+                  />
+                  <Toggle
+                    label="Joint angles"
+                    hint="Knee, hip and ankle, in degrees"
+                    checked={showAngles}
+                    onChange={setShowAngles}
+                  />
+                  <Toggle
+                    label="Highlight ball"
+                    hint="Rings the ball when it is detected"
+                    checked={showBall}
+                    onChange={setShowBall}
+                  />
+                  <Toggle
+                    label="Front camera"
+                    hint={facing === "user" ? "Selfie camera, preview mirrored" : "Rear camera"}
+                    checked={facing === "user"}
+                    onChange={flipCamera}
+                    disabled={!camReady || isRecording}
+                  />
+                </div>
+
+                <p className="text-[11px] text-muted-foreground/70 mt-3 leading-relaxed">
+                  The overlay runs entirely in this tab — no frame leaves your device for it, and it is
+                  a framing aid only. Nothing here is scored; the analysis re-runs a heavier model on
+                  the server against the original video.
+                </p>
+              </div>
+
+              <p className="text-xs text-muted-foreground mt-3 leading-relaxed">
+                Prop the phone side-on to the ball, level with it, whole body in frame. Recording stops
+                automatically at {REC_LIMIT_MS / 1000} seconds — you only need the run-up and the strike.
+              </p>
+            </div>
+          )}
+
+          {/* Footedness — the single most valuable thing the user can tell us.
+              From a side-on camera the near and far leg overlap constantly, and
+              guessing wrong mirrors every result. */}
+          <div className="bg-card border border-border rounded-xl p-5 mb-6">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <p className="font-semibold text-foreground text-sm mb-1">Which foot do you shoot with?</p>
+                <p className="text-xs text-muted-foreground max-w-md leading-relaxed">
+                  Telling us beats guessing. From a side-on camera the near and far leg overlap
+                  constantly, and picking the wrong one mirrors every result.
+                </p>
+              </div>
+              <div className="flex gap-2">
+                {([["auto", "Auto-detect"], ["right", "Right"], ["left", "Left"]] as const).map(([val, label]) => (
+                  <button
+                    key={val}
+                    onClick={() => setFootedness(val)}
+                    className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
+                      footedness === val
+                        ? "border-primary text-primary bg-primary/10"
+                        : "border-border text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Filming + privacy notice */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-20">
+            <div className="flex items-start gap-2.5 border border-border rounded-xl p-4">
+              <Info className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                <span className="text-foreground font-semibold">Film side-on.</span> Stand the camera
+                level with the ball, square to the line of the shot, with the whole body in frame.
+                Plant placement, backswing reach and torso lean are all read across the image, so a
+                face-on angle flattens them and they will not be scored.
+              </p>
+            </div>
+            <div className="flex items-start gap-2.5 border border-border rounded-xl p-4">
+              <AlertCircle className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                <span className="text-foreground font-semibold">Your video is uploaded</span> to the
+                analysis server when you press Run Pose Analysis. The server reads the frames it needs
+                and deletes the file immediately after — nothing is retained.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── STEP 2: Select clips (3-page reel scrubber) ── */}
+      {step === "select" && (
+        <div className="max-w-3xl mx-auto px-6 py-8">
+          {/* Hidden video used purely to extract filmstrip thumbnails —
+              never displayed, so scrubbing the reel doesn't disturb it. */}
+          {videoUrl && (
+            <video
+              ref={thumbVideoRef}
+              src={videoUrl}
+              // Kept off-screen rather than display:none. A hidden media element
+              // is deprioritised by the browser, and seeking one frame by frame
+              // to build the filmstrip then stalls or never fires `seeked` — so
+              // it stays rendered, just nowhere anyone can see it.
+              style={{ position: "fixed", left: -9999, top: 0, width: 2, height: 2, opacity: 0, pointerEvents: "none" }}
+              aria-hidden="true"
+              muted
+              playsInline
+              preload="auto"
+              onLoadedMetadata={handleThumbVideoLoaded}
+            />
+          )}
+
+          <div className="mb-6">
+            <h2
+              className="text-2xl font-black text-foreground tracking-wide"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+            >
+              MARK YOUR SHOT PHASES
+            </h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              Scroll the reel to slide the {activeWindow.toFixed(2)}s window over your{" "}
+              {SEGMENT_CONFIG[selectPage].label.toLowerCase()} moment. Press play and the reel follows.
+            </p>
+            {thumbsLoading && (
+              <p
+                className="text-[11px] text-primary mt-1.5 flex items-center gap-1.5"
+                style={{ fontFamily: "'JetBrains Mono', monospace" }}
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+                Generating preview frames…
+              </p>
+            )}
+          </div>
+
+          {error && (
+            <div className="flex items-start gap-2.5 border border-[#e03c3c]/40 bg-[#e03c3c]/8 rounded-xl p-4 mb-5">
+              <AlertTriangle className="w-4 h-4 text-[#e03c3c] mt-0.5 shrink-0" />
+              <div>
+                <p className="text-sm text-foreground font-semibold mb-0.5">Analysis failed</p>
+                <p className="text-xs text-muted-foreground leading-relaxed">{error}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Page indicator */}
+          <div className="flex items-center justify-center gap-2 mb-5">
+            {SEGMENT_CONFIG.map((seg, i) => (
+              <button
+                key={seg.key}
+                onClick={() => setSelectPage(i)}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all"
+                style={{
+                  borderColor: i === selectPage ? seg.color : "var(--border)",
+                  backgroundColor: i === selectPage ? `${seg.color}1a` : "transparent",
+                }}
+              >
+                <div
+                  className="w-2 h-2 rounded-full"
+                  style={{ backgroundColor: i <= selectPage ? seg.color : "var(--muted-foreground)" }}
+                />
+                <span
+                  className="text-[11px] font-black tracking-widest"
+                  style={{
+                    fontFamily: "'Barlow Condensed', sans-serif",
+                    color: i === selectPage ? seg.color : "var(--muted-foreground)",
+                  }}
+                >
+                  {i + 1}. {seg.shortLabel}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {/* Video preview */}
+          <div className="bg-card border border-border rounded-xl overflow-hidden mb-5">
+            <div className="relative aspect-video bg-black flex items-center justify-center">
+              {videoUrl ? (
+                <video
+                  ref={videoRef}
+                  src={videoUrl}
+                  className="w-full h-full object-contain"
+                  onTimeUpdate={handleTimeUpdate}
+                  onLoadedMetadata={handleLoadedMetadata}
+                  onEnded={() => setIsPlaying(false)}
+                />
+              ) : (
+                <div className="text-muted-foreground text-sm">No video loaded</div>
+              )}
+              <button
+                onClick={togglePlay}
+                className="absolute inset-0 flex items-center justify-center bg-black/0 hover:bg-black/25 transition-colors group"
+              >
+                <div className="w-14 h-14 rounded-full bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                  {isPlaying
+                    ? <Pause className="w-6 h-6 text-white" />
+                    : <Play className="w-6 h-6 text-white ml-0.5" />
+                  }
+                </div>
+              </button>
+              <div
+                className="absolute bottom-3 left-3 text-[11px] bg-black/70 px-2 py-1 rounded text-white"
+                style={{ fontFamily: "'JetBrains Mono', monospace" }}
+              >
+                {fmt(currentTime)} / {fmt(duration)}
+              </div>
+            </div>
+          </div>
+
+          {/* Active phase card + reel */}
+          {(() => {
+            const seg = SEGMENT_CONFIG[selectPage];
+            return (
+              <div
+                className="bg-card border rounded-xl p-5 mb-5"
+                style={{ borderColor: `${seg.color}55` }}
+              >
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: seg.color }} />
+                    <span
+                      className="font-black text-sm tracking-wider text-foreground"
+                      style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+                    >
+                      {seg.label.toUpperCase()}
+                    </span>
+                  </div>
+                  <div
+                    className="text-[11px] text-muted-foreground"
+                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                  >
+                    {fmt(segments[seg.key])} <span className="text-foreground/30">→</span> {fmt(segments[seg.key] + windows[seg.key])}
+                    <span className="ml-2 text-muted-foreground/50">· {windows[seg.key].toFixed(2)}s</span>
+                  </div>
+                </div>
+
+                <ReelScrubber
+                  thumbnails={thumbnails}
+                  duration={duration}
+                  pxPerSecond={PX_PER_SECOND}
+                  value={segments[seg.key]}
+                  color={seg.color}
+                  windowSeconds={windows[seg.key]}
+                  markers={reelMarkers}
+                  playheadTime={isPlaying ? currentTime : null}
+                  containerWidth={reelWidth}
+                  onMeasure={setReelWidth}
+                  onChange={(t) => {
+                    setSegments(prev => ({ ...prev, [seg.key]: t }));
+                    setTouched(prev => (prev[seg.key] ? prev : { ...prev, [seg.key]: true }));
+                    seekTo(t);
+                  }}
+                />
+
+                {/* Window length. More frames gives the pose model more chances
+                    at a clean one; fewer makes the pick more specific. */}
+                <div className="flex items-center gap-3 mt-4">
+                  <span
+                    className="text-[10px] font-black tracking-widest text-muted-foreground shrink-0"
+                    style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+                  >
+                    WINDOW
+                  </span>
+                  <input
+                    type="range"
+                    min={WINDOW_MIN}
+                    max={WINDOW_MAX}
+                    step={WINDOW_STEP}
+                    value={windows[seg.key]}
+                    aria-label="Capture window length"
+                    onChange={e => {
+                      const w = Number(e.target.value);
+                      setWindows(prev => ({ ...prev, [seg.key]: w }));
+                      // Keep the window inside the clip when it grows near the end.
+                      setSegments(prev => ({
+                        ...prev,
+                        [seg.key]: Math.min(prev[seg.key], Math.max(0, duration - w)),
+                      }));
+                      setTouched(prev => ({ ...prev, [seg.key]: true }));
+                    }}
+                    className="flex-1 accent-primary"
+                    style={{ accentColor: seg.color }}
+                  />
+                  <span
+                    className="text-[11px] text-muted-foreground shrink-0 tabular-nums"
+                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                  >
+                    {windows[seg.key].toFixed(2)}s · ~{Math.max(1, Math.round(windows[seg.key] * sourceFps))} frames
+                  </span>
+                </div>
+
+                <p className="text-xs text-muted-foreground mt-3 leading-relaxed">
+                  {PHASE_HINT[seg.key]}
+                </p>
+              </div>
+            );
+          })()}
+
+          {/* Phase info callout */}
+          <div className="flex items-start gap-2 px-1 mb-6">
+            <Info className="w-3.5 h-3.5 text-muted-foreground mt-0.5 shrink-0" />
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Best results come from a side-angle shot at 45–90° to the ball's path. Scroll or drag the
+              reel like a video filmstrip, or press play and let it follow. Phases you have already set
+              stay marked on the reel in their own colour. Mark them in order: plant, then contact,
+              then follow-through.
+            </p>
+          </div>
+
+          {/* Page navigation */}
+          <div className="flex items-center justify-between gap-3">
+            <button
+              onClick={() => setSelectPage(p => Math.max(0, p - 1))}
+              disabled={selectPage === 0}
+              className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:pointer-events-none transition-colors border border-border px-4 py-3 rounded-xl"
+            >
+              <ChevronLeft className="w-4 h-4" />
+              Back
+            </button>
+
+            {selectPage < SEGMENT_CONFIG.length - 1 ? (
+              <button
+                onClick={() => {
+                  // Moving on counts as accepting this phase's window, so it
+                  // shows on the reel while the next one is picked.
+                  setTouched(prev => ({ ...prev, [activeKey]: true }));
+                  setSelectPage(p => Math.min(SEGMENT_CONFIG.length - 1, p + 1));
+                }}
+                className="flex-1 bg-primary text-primary-foreground font-black text-base tracking-widest py-4 rounded-xl flex items-center justify-center gap-2.5 hover:bg-primary/90 active:scale-[0.98] transition-all"
+                style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+              >
+                NEXT: {SEGMENT_CONFIG[selectPage + 1].label.toUpperCase()}
+                <ChevronRight className="w-5 h-5" />
+              </button>
+            ) : (
+              <button
+                onClick={startAnalysis}
+                disabled={!videoFile}
+                className="flex-1 bg-primary text-primary-foreground font-black text-base tracking-widest py-4 rounded-xl flex items-center justify-center gap-2.5 hover:bg-primary/90 active:scale-[0.98] disabled:opacity-40 disabled:pointer-events-none transition-all"
+                style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+              >
+                <Zap className="w-5 h-5" />
+                RUN POSE ANALYSIS
+              </button>
+            )}
+          </div>
+
+          <p className="text-xs text-center text-muted-foreground mt-4">
+            Your video is uploaded to the analysis server, then deleted once its frames have been read.
+          </p>
+        </div>
+      )}
+
+      {/* ── STEP 3: Analyzing ── */}
+      {step === "analyzing" && (
+        <div className="min-h-[85vh] flex flex-col items-center justify-center px-6">
+          <div className="text-center max-w-sm w-full">
+            {/* Pulsing rings */}
+            <div className="relative w-24 h-24 mx-auto mb-10">
+              <div className="absolute inset-0 rounded-full border border-primary/15 animate-ping" style={{ animationDuration: "2s" }} />
+              <div className="absolute inset-3 rounded-full border border-primary/25 animate-ping" style={{ animationDuration: "2s", animationDelay: "0.4s" }} />
+              <div className="absolute inset-6 rounded-full border border-primary/40 animate-ping" style={{ animationDuration: "2s", animationDelay: "0.8s" }} />
+              <div className="absolute inset-0 flex items-center justify-center">
+                <Zap className="w-8 h-8 text-primary" />
+              </div>
+            </div>
+
+            <h2
+              className="text-4xl font-black text-foreground tracking-wide mb-2"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+            >
+              ANALYZING
+            </h2>
+            <p className="text-muted-foreground text-sm mb-8">
+              {stage === "upload"
+                ? `Uploading video… ${Math.round(uploadPct * 100)}%`
+                : "Decoding, detecting pose and tracking the ball on the server…"}
+            </p>
+
+            {/* Upload progress is real and measurable. Server-side work reports
+                nothing until it finishes, so it gets an indeterminate bar rather
+                than an invented percentage. */}
+            <div className="w-full bg-muted rounded-full h-1.5 mb-2 overflow-hidden">
+              {stage === "upload" ? (
+                <div
+                  className="bg-primary h-1.5 rounded-full transition-all duration-300 ease-out"
+                  style={{ width: `${Math.round(uploadPct * 100)}%` }}
+                />
+              ) : (
+                <div className="h-1.5 w-1/3 rounded-full bg-primary animate-pulse" />
+              )}
+            </div>
+            <div
+              className="text-right text-xs text-muted-foreground mb-8"
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              {stage === "upload" ? `${Math.round(uploadPct * 100)}%` : "working…"}
+            </div>
+
+            {/* Stage list — two honest states, not a scripted countdown. */}
+            <div className="space-y-2.5 text-left">
+              {[
+                { key: "upload", label: "Upload video to analysis server" },
+                { key: "analyze", label: "Decode · pose · ball · scoring" },
+              ].map(({ key, label }) => {
+                const done = key === "upload" && stage === "analyze";
+                const active = key === stage;
+                return (
+                  <div
+                    key={label}
+                    className={`flex items-center gap-3 text-sm transition-all duration-500 ${
+                      done || active ? "text-foreground" : "text-muted-foreground/25"
+                    }`}
+                  >
+                    <div className={`w-1.5 h-1.5 rounded-full shrink-0 transition-colors ${
+                      done ? "bg-primary" : active ? "bg-primary animate-pulse" : "bg-muted-foreground/20"
+                    }`} />
+                    <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px" }}>
+                      {done && "✓ "}{label}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <p className="text-[11px] text-muted-foreground/60 mt-8 leading-relaxed">
+              The heavy pose model runs three phases in parallel. A cold worker takes longer than a warm one.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── STEP 4: Results ── */}
+      {step === "results" && results && (
+        <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
+          {/* Title bar */}
+          <div className="flex items-start justify-between">
+            <div>
+              <h2
+                className="text-3xl font-black text-foreground tracking-wide"
+                style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+              >
+                SHOT ANALYSIS REPORT
+              </h2>
+              <p className="text-sm text-muted-foreground mt-1">
+                MediaPipe Pose Landmarker · 33 keypoints · {results.phases.length} phases analyzed
+                {results.timing?.totalMs != null && ` · ${(results.timing.totalMs / 1000).toFixed(1)}s`}
+              </p>
+            </div>
+            <button
+              onClick={reset}
+              className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors border border-border px-4 py-2 rounded-lg hover:bg-card"
+            >
+              <RotateCcw className="w-4 h-4" />
+              New clip
+            </button>
+          </div>
+
+          {/* Warnings straight from the server — these qualify everything below,
+              so they sit above the scores rather than under them. */}
+          {results.warnings.length > 0 && (
+            <div className="border border-[#ffb800]/40 bg-[#ffb800]/8 rounded-xl p-5">
+              <div className="flex items-center gap-2.5 mb-3">
+                <AlertTriangle className="w-4 h-4 text-[#ffb800]" />
+                <h3
+                  className="text-sm font-black tracking-widest text-foreground"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+                >
+                  READ THIS FIRST
+                </h3>
+              </div>
+              <ul className="space-y-2.5">
+                {results.warnings.map((w, i) => (
+                  <li key={i} className="flex items-start gap-3">
+                    <div className="w-1.5 h-1.5 rounded-full bg-[#ffb800] mt-2 shrink-0" />
+                    <span className="text-sm text-muted-foreground leading-relaxed">{w}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Score overview */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Overall */}
+            <div className="bg-card border border-border rounded-xl p-6 flex flex-col items-center justify-center gap-3">
+              <div className="relative w-28 h-28">
+                <ScoreRing score={results.overall ?? 0} size={112} color={scoreColor(results.overall)} />
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                  <span
+                    className="text-foreground font-black leading-none"
+                    style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "2.2rem" }}
+                  >
+                    {results.overall ?? "–"}
+                  </span>
+                  <span className="text-muted-foreground text-xs" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+                    {results.overall === null ? "not scored" : "/100"}
+                  </span>
+                </div>
+              </div>
+              <span
+                className="text-xs font-bold tracking-widest text-muted-foreground"
+                style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+              >
+                OVERALL SCORE
+              </span>
+            </div>
+
+            {/* Phase scores */}
+            {results.phases.map((phase) => (
+              <div
+                key={phase.key}
+                className={`bg-card border rounded-xl p-5 cursor-pointer transition-all duration-150 ${
+                  expandedPhase === phase.key ? "border-primary/30" : "border-border hover:border-border/60"
+                }`}
+                onClick={() => setExpandedPhase(expandedPhase === phase.key ? null : phase.key)}
+              >
+                <div className="flex items-center justify-between mb-4">
+                  <span
+                    className="text-xs font-black tracking-wider text-foreground"
+                    style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+                  >
+                    {phase.label.toUpperCase()}
+                  </span>
+                  <span
+                    className="font-black text-xl"
+                    style={{ color: scoreColor(phase.score), fontFamily: "'Barlow Condensed', sans-serif" }}
+                  >
+                    {phase.score ?? "–"}
+                  </span>
+                </div>
+
+                <div className="w-full bg-muted rounded-full h-1 mb-4">
+                  <div
+                    className="h-1 rounded-full"
+                    style={{ width: `${phase.score ?? 0}%`, backgroundColor: scoreColor(phase.score) }}
+                  />
+                </div>
+
+                {phase.insufficient && (
+                  <p className="text-[11px] text-muted-foreground leading-relaxed mb-3">
+                    Too few metrics could be measured here to publish a score.
+                  </p>
+                )}
+
+                <div className="space-y-2">
+                  {phase.metrics.map((m) => (
+                    <div key={m.id} className="flex items-center justify-between">
+                      <span className="text-xs text-muted-foreground truncate pr-2">{m.name}</span>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <div className={`w-1.5 h-1.5 rounded-full ${getStatusDot(m.status)}`} />
+                        <span
+                          className="text-xs font-medium text-foreground"
+                          style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                        >
+                          {m.value ?? "—"}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {expandedPhase === phase.key && (
+                  <div className="mt-3 pt-3 border-t border-border space-y-2.5">
+                    {phase.metrics.map((m) => (
+                      <div key={m.id}>
+                        <p className="text-[11px] text-foreground font-semibold">{m.name}</p>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed">
+                          Ideal {m.ideal}
+                          {m.value ? ` · yours ${m.value}` : ""}
+                          {m.status === "unknown" && m.reason ? ` · ${m.reason}` : ""}
+                        </p>
+                        {m.caveat && (
+                          <p className="text-[10px] text-muted-foreground/70 leading-relaxed mt-0.5">{m.caveat}</p>
+                        )}
+                      </div>
+                    ))}
+                    <p className="text-[10px] text-muted-foreground/60 pt-1">
+                      {phase.counted} metric{phase.counted === 1 ? "" : "s"} scored, {phase.skipped} not measurable.
+                    </p>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Annotated frames — the actual frames the server measured, with the
+              skeleton, tracked ball and scored joint angles drawn on. Those
+              angle labels come from the same scored metrics as the table above,
+              coloured by how each one scored, so the picture explains the rows.
+              This replaces the illustrative stick figures the design carried. */}
+          <div className="bg-card border border-border rounded-xl p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+              <h3
+                className="text-sm font-black tracking-widest text-foreground"
+                style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+              >
+                MEASURED FRAMES
+              </h3>
+              <div className="flex items-center gap-3 text-[10px] text-muted-foreground"
+                style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+                <span>JOINT ANGLES:</span>
+                {([["#00df54", "80+"], ["#ffb800", "60–79"], ["#e03c3c", "under 60"]] as const).map(([c, t]) => (
+                  <span key={t} className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: c }} />
+                    {t}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {results.phases.map((p) => (
+                <div key={p.key} className="border border-border rounded-lg p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <span
+                      className="text-xs font-black tracking-wider"
+                      style={{ fontFamily: "'Barlow Condensed', sans-serif", color: p.color }}
+                    >
+                      {p.label.toUpperCase()}
+                    </span>
+                    <span
+                      className="text-sm font-bold"
+                      style={{ color: scoreColor(p.score), fontFamily: "'JetBrains Mono', monospace" }}
+                    >
+                      {p.score === null ? "not scored" : `${p.score}/100`}
+                    </span>
+                  </div>
+
+                  <div className="rounded-md overflow-hidden bg-black mb-3">
+                    {p.image ? (
+                      <img src={p.image} alt={`${p.label} frame with detected pose`} className="w-full object-contain" />
+                    ) : (
+                      <div className="h-40 flex items-center justify-center text-xs text-muted-foreground">
+                        No frame returned
+                      </div>
+                    )}
+                  </div>
+
+                  <div
+                    className="text-[10px] text-muted-foreground space-y-0.5"
+                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                  >
+                    {p.time !== null && <div>t = {p.time.toFixed(3)}s</div>}
+                    {p.shiftedMs !== 0 && (
+                      <div className="text-[#ffb800]">
+                        nearest clean frame used ({p.shiftedMs > 0 ? "+" : ""}{p.shiftedMs}ms)
+                      </div>
+                    )}
+                    <div className={p.ballFound ? "" : "text-muted-foreground/60"}>
+                      {p.ballFound ? "ball tracked" : "no ball tracked"}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Feedback */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Strengths */}
+            <div className="bg-card border border-border rounded-xl p-6">
+              <div className="flex items-center gap-2.5 mb-5">
+                <CheckCircle2 className="w-4 h-4 text-primary" />
+                <h3
+                  className="text-sm font-black tracking-widest text-foreground"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+                >
+                  WHAT WENT WELL
+                </h3>
+              </div>
+              {results.strengths.length === 0 ? (
+                <p className="text-sm text-muted-foreground leading-relaxed">
+                  Nothing scored in the top band this time. The improvements opposite are where to start.
+                </p>
+              ) : (
+                <ul className="space-y-3.5">
+                  {results.strengths.map((s, i) => (
+                    <li key={i} className="flex items-start gap-3">
+                      <div className="w-1.5 h-1.5 rounded-full bg-primary mt-2 shrink-0" />
+                      <span className="text-sm text-foreground leading-relaxed">{s}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {/* Improvements */}
+            <div className="bg-card border border-border rounded-xl p-6">
+              <div className="flex items-center gap-2.5 mb-5">
+                <AlertCircle className="w-4 h-4 text-accent" />
+                <h3
+                  className="text-sm font-black tracking-widest text-foreground"
+                  style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+                >
+                  WHAT TO IMPROVE
+                </h3>
+              </div>
+              {results.improvements.length === 0 ? (
+                <p className="text-sm text-muted-foreground leading-relaxed">
+                  Nothing fell below the good band in the metrics that could be measured.
+                </p>
+              ) : (
+                <ul className="space-y-3.5">
+                  {results.improvements.map((s, i) => (
+                    <li key={i} className="flex items-start gap-3">
+                      <div className="w-1.5 h-1.5 rounded-full bg-accent mt-2 shrink-0" />
+                      <span className="text-sm text-foreground leading-relaxed">{s}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+
+          {/* What this can and cannot measure */}
+          <details className="bg-card border border-border rounded-xl p-6">
+            <summary className="text-sm font-black tracking-widest text-foreground cursor-pointer"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
+              WHAT THIS SYSTEM CAN AND CANNOT MEASURE
+            </summary>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-5">
+              <div>
+                <p className="text-xs font-bold text-foreground mb-2">Reasonably detectable</p>
+                <ul className="space-y-1.5 text-xs text-muted-foreground leading-relaxed">
+                  <li>Joint angles (knee, hip, ankle)</li>
+                  <li>Torso lean relative to vertical</li>
+                  <li>Limb positions relative to the hips, normalized by torso length</li>
+                  <li>Whether body mass is stacked over the support foot</li>
+                  <li>Ball position, and the plant foot's fore/aft position relative to it</li>
+                </ul>
+              </div>
+              <div>
+                <p className="text-xs font-bold text-foreground mb-2">Unreliable / not measured</p>
+                <ul className="space-y-1.5 text-xs text-muted-foreground leading-relaxed">
+                  <li>The exact point on the boot that met the ball</li>
+                  <li>Ball speed, spin, or where the shot went</li>
+                  <li>True 3D hip rotation from one camera — only a rough 2D proxy</li>
+                  <li>Lateral plant-foot distance from the ball</li>
+                  <li>Anything depending on depth toward or away from the camera</li>
+                </ul>
+              </div>
+            </div>
+            <p className="text-[11px] text-muted-foreground/70 mt-4">
+              Metrics shown with a grey dot could not be measured from this footage and are excluded
+              from every score above.
+            </p>
+          </details>
+
+          {/* CTA */}
+          <div className="flex items-center justify-between pt-2 pb-8">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <TrendingUp className="w-3.5 h-3.5" />
+              Camera read as {results.context?.view?.label ?? "unknown"} · kicking leg:{" "}
+              {results.context?.kickSide ?? "unknown"}
+            </div>
+            <button
+              onClick={reset}
+              className="flex items-center gap-2 bg-primary text-primary-foreground font-black text-sm tracking-widest px-6 py-3 rounded-xl hover:bg-primary/90 active:scale-[0.98] transition-all"
+              style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+            >
+              <RotateCcw className="w-4 h-4" />
+              ANALYZE ANOTHER SHOT
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

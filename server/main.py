@@ -23,14 +23,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import os
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 
+import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
 import analysis
@@ -99,6 +102,10 @@ class AnalyseSpec(BaseModel):
     phases: dict[str, PhasePick]
     fps: float = 30.0
     footedness: str = Field(default="auto", pattern="^(auto|left|right)$")
+    # The duration the BROWSER measured for this video. The picked times are
+    # points on that timeline, and it is not always the timeline the container's
+    # own metadata implies — see video.extract_clips.
+    duration: float | None = None
 
     def window(self, name: str) -> tuple[float, float]:
         pick = self.phases[name]
@@ -154,7 +161,51 @@ async def analyze(video_file: UploadFile = File(..., alias="video"),
             pass
 
     result["timing"]["totalMs"] = round((time.perf_counter() - t_start) * 1000)
-    return result
+    return _json_safe(result)
+
+
+def _json_safe(obj):
+    """Make a response payload survive JSON encoding.
+
+    NaN and Infinity are not valid JSON and json.dumps refuses them outright, so
+    one unmeasurable number anywhere in a response turns a complete analysis
+    into a 500 with nothing in it — the user waited for the upload and the heavy
+    model and gets a stack trace. The known sources are fixed where they arise
+    (scoring._score_metric, biomechanics.ViewQuality.as_dict, video.probe);
+    this is the net under them, and it also flattens numpy scalars, which the
+    encoder cannot serialise either.
+    """
+    if isinstance(obj, np.generic):
+        return _json_safe(obj.item())
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
+# ── The browser client ──────────────────────────────────────────────────────
+# Serving the page from here too means one ngrok tunnel covers both it and the
+# API, and the page then talks to its own origin — no pasting a URL that changes
+# every time the tunnel restarts.
+#
+# This points at ui/dist, the Vite build output, and nothing else: everything
+# under it is generated for the browser, so mounting the whole directory
+# publishes no source. Pointing it at the repo root would expose server/ and the
+# 54MB models/ over a public URL. Build it with `npm install && npm run build`
+# in ui/. The mount is declared after /health and /analyze, so those still win.
+_REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+CLIENT_DIR = os.environ.get("SFAI_CLIENT_DIR", os.path.join(_REPO_ROOT, "ui", "dist"))
+
+if os.path.isfile(os.path.join(CLIENT_DIR, "index.html")):
+    app.mount("/", StaticFiles(directory=CLIENT_DIR, html=True), name="client")
+else:
+    @app.get("/", include_in_schema=False)
+    def client_missing():
+        raise HTTPException(
+            503, f"No built client at {CLIENT_DIR}. Run: cd ui && npm install && npm run build")
 
 
 async def _run(path: str, spec: AnalyseSpec) -> dict:
@@ -162,7 +213,8 @@ async def _run(path: str, spec: AnalyseSpec) -> dict:
     try:
         info = video.probe(path)
         clips = video.extract_clips(path, {p: spec.window(p) for p in PHASES},
-                                    fallback_fps=spec.fps)
+                                    fallback_fps=spec.fps,
+                                    source_duration=spec.duration)
     except video.VideoError as e:
         raise HTTPException(400, str(e))
     decode_ms = round((time.perf_counter() - t0) * 1000)
@@ -207,7 +259,8 @@ async def _run(path: str, spec: AnalyseSpec) -> dict:
     for p in PHASES:
         img = per_phase[p]["image"]
         drawn = analysis.draw_pose(img, frames[p]["pts"],
-                                  analysis.highlight_for(p, ctx), frames[p]["ball"])
+                                  analysis.highlight_for(p, ctx), frames[p]["ball"],
+                                  angles=analysis.angle_labels(scored["phases"][p], ctx))
         out_frames[p] = {
             "time": round(frames[p]["time"], 3),
             "shiftedMs": per_phase[p].get("shifted_ms", 0),
