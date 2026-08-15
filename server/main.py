@@ -1,0 +1,291 @@
+"""Soccer Form AI — analysis server.
+
+The browser captures the video, shows the live skeleton/ball overlay, and lets
+the user pick three moments. Everything after that happens here: decoding at
+native resolution, pose across each clip with the heavy model, ball tracking,
+biomechanics and scoring.
+
+Run:
+    python -m uvicorn main:app --host 0.0.0.0 --port 8000
+    (from inside the server/ directory)
+
+Then expose it:
+    ngrok http 8000
+
+PRIVACY: unlike the original browser-only build, video uploaded here leaves the
+user's device. Uploads are written to a temp file, used, and deleted in a
+finally block — nothing is retained after the response is sent — but the client
+UI must say plainly that the video is being sent to a server, and it does.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import os
+import tempfile
+import time
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, ValidationError
+
+import analysis
+import biomechanics
+import models_cache
+import scoring
+import video
+from worker import analyse_phase
+
+PHASES = ("plant", "contact", "followThrough")
+PHASE_LABEL = {"plant": "Plant + Backswing", "contact": "Contact",
+               "followThrough": "Follow-through"}
+
+# Automatic clip span when the user did not set bounds by hand: ~8 frames at
+# 30fps either side of the picked instant.
+AUTO_SPAN_S = 0.26
+# At a real contact frame a foot is touching the ball, so the gap is about the
+# ball's own radius (~0.2 torso). Well past that and the picked frame is not the
+# strike, which matters because every contact metric assumes it is.
+CONTACT_NEAR_TORSO = 0.55
+MAX_UPLOAD_MB = int(os.environ.get("SFAI_MAX_UPLOAD_MB", "200"))
+
+# One worker per phase. Each holds its own MediaPipe graphs, which are neither
+# picklable nor thread-safe, so this is processes rather than threads. Three
+# leaves plenty of the 12 cores for the TFLite/XNNPACK thread pools inside each.
+WORKERS = int(os.environ.get("SFAI_WORKERS", "3"))
+
+_pool: ProcessPoolExecutor | None = None
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global _pool
+    models_cache.prefetch_all()   # never make the first request pay for the download
+    _pool = ProcessPoolExecutor(max_workers=WORKERS)
+    try:
+        yield
+    finally:
+        _pool.shutdown(wait=False, cancel_futures=True)
+
+
+app = FastAPI(title="Soccer Form AI", version="2.0", lifespan=lifespan)
+
+# The browser page is served from somewhere else entirely (a local static
+# server, GitHub Pages, wherever) and reaches this through an ngrok URL, so the
+# origin never matches. Tighten SFAI_ALLOW_ORIGINS in any real deployment.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.environ.get("SFAI_ALLOW_ORIGINS", "*").split(","),
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class ClipBounds(BaseModel):
+    start: float | None = None
+    end: float | None = None
+
+
+class PhasePick(BaseModel):
+    time: float
+    clip: ClipBounds | None = None
+
+
+class AnalyseSpec(BaseModel):
+    phases: dict[str, PhasePick]
+    fps: float = 30.0
+    footedness: str = Field(default="auto", pattern="^(auto|left|right)$")
+
+    def window(self, name: str) -> tuple[float, float]:
+        pick = self.phases[name]
+        c = pick.clip
+        if c and c.start is not None and c.end is not None and abs(c.end - c.start) > 1e-3:
+            return (min(c.start, c.end), max(c.start, c.end))
+        return (pick.time - AUTO_SPAN_S / 2, pick.time + AUTO_SPAN_S / 2)
+
+
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "workers": WORKERS,
+        "poseModel": os.path.basename(models_cache.POSE_HEAVY[0]),
+        "ballModel": os.path.basename(models_cache.DETECTOR_LITE2[0]),
+        "maxUploadMb": MAX_UPLOAD_MB,
+        "maxEdge": video.MAX_EDGE,
+    }
+
+
+@app.post("/analyze")
+async def analyze(video_file: UploadFile = File(..., alias="video"),
+                  spec: str = Form(...)):
+    t_start = time.perf_counter()
+    try:
+        parsed = AnalyseSpec.model_validate_json(spec)
+    except ValidationError as e:
+        raise HTTPException(422, f"Bad spec: {e.errors()[:3]}")
+    missing = [p for p in PHASES if p not in parsed.phases]
+    if missing:
+        raise HTTPException(422, f"Missing phase picks: {', '.join(missing)}")
+
+    data = await video_file.read()
+    if not data:
+        raise HTTPException(400, "Empty upload.")
+    if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(413, f"Video larger than {MAX_UPLOAD_MB}MB.")
+
+    suffix = os.path.splitext(video_file.filename or "")[1] or ".webm"
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    try:
+        with open(path, "wb") as f:
+            f.write(data)
+        result = await _run(path, parsed)
+    finally:
+        # The upload exists on disk only for as long as it takes to read the
+        # frames out of it.
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    result["timing"]["totalMs"] = round((time.perf_counter() - t_start) * 1000)
+    return result
+
+
+async def _run(path: str, spec: AnalyseSpec) -> dict:
+    t0 = time.perf_counter()
+    try:
+        info = video.probe(path)
+        clips = video.extract_clips(path, {p: spec.window(p) for p in PHASES},
+                                    fallback_fps=spec.fps)
+    except video.VideoError as e:
+        raise HTTPException(400, str(e))
+    decode_ms = round((time.perf_counter() - t0) * 1000)
+
+    empty = [p for p in PHASES if not clips[p]]
+    if empty:
+        raise HTTPException(
+            422,
+            f"No frames found for: {', '.join(PHASE_LABEL[p] for p in empty)}. "
+            "The picked times may be past the end of the video.")
+
+    # Pose + ball for the three phases run in parallel, one process each.
+    t1 = time.perf_counter()
+    loop = asyncio.get_running_loop()
+    jobs = [loop.run_in_executor(_pool, analyse_phase, clips[p], spec.phases[p].time)
+            for p in PHASES]
+    try:
+        done = await asyncio.gather(*jobs)
+    except Exception as e:
+        raise HTTPException(500, f"Analysis failed: {type(e).__name__}: {e}")
+    detect_ms = round((time.perf_counter() - t1) * 1000)
+
+    per_phase = dict(zip(PHASES, done))
+    unreadable = [p for p in PHASES if per_phase[p].get("pts") is None]
+    if unreadable:
+        raise HTTPException(
+            422,
+            "No person detected in: "
+            + ", ".join(PHASE_LABEL[p] for p in unreadable)
+            + ". Pick a moment where the whole body is visible.")
+
+    frames = {p: {"pts": per_phase[p]["pts"],
+                  "ball": per_phase[p].get("ball"),
+                  "time": per_phase[p]["time"]} for p in PHASES}
+
+    ctx = biomechanics.derive_context(frames, footedness=spec.footedness)
+    scored = scoring.score_all(analysis.compute_metrics(frames, ctx), ctx.view.score)
+
+    warnings = _warnings(spec, ctx, frames, per_phase)
+
+    out_frames = {}
+    for p in PHASES:
+        img = per_phase[p]["image"]
+        drawn = analysis.draw_pose(img, frames[p]["pts"],
+                                  analysis.highlight_for(p, ctx), frames[p]["ball"])
+        out_frames[p] = {
+            "time": round(frames[p]["time"], 3),
+            "shiftedMs": per_phase[p].get("shifted_ms", 0),
+            "ball": _ball_out(frames[p]["ball"]),
+            "ballFramesFound": per_phase[p].get("ball_found", 0),
+            "clipFrames": per_phase[p].get("clip_len", 0),
+            "image": "data:image/jpeg;base64,"
+                     + base64.b64encode(video.encode_jpeg(drawn)).decode("ascii"),
+        }
+
+    return {
+        "overall": scored["overall"],
+        "phases": scored["phases"],
+        "context": ctx.as_dict(),
+        "frames": out_frames,
+        "warnings": warnings,
+        "video": info,
+        "timing": {"decodeMs": decode_ms, "detectMs": detect_ms},
+    }
+
+
+def _ball_out(ball):
+    if not ball:
+        return None
+    return {"x": round(ball["x"], 1), "y": round(ball["y"], 1), "r": round(ball["r"], 1),
+            "score": round(ball["score"], 3),
+            "interpolated": bool(ball.get("interpolated")),
+            "rescued": bool(ball.get("rescued"))}
+
+
+def _warnings(spec: AnalyseSpec, ctx, frames, per_phase) -> list[str]:
+    out = []
+
+    times = [spec.phases[p].time for p in PHASES]
+    if not (times[0] < times[1] < times[2]):
+        out.append("Your three moments are not in chronological order "
+                   "(plant → contact → follow-through), so direction and leg "
+                   "detection may be wrong.")
+
+    if ctx.view.label == "face-on":
+        out.append(
+            f"This looks close to face-on (shoulder span {ctx.view.shoulder_ratio:.2f} "
+            "× torso). Fore/aft measurements — plant placement, reach, torso lean — "
+            "cannot be read from this angle and have been left unscored. "
+            "Film side-on, level with the ball, for a full analysis.")
+    elif ctx.view.label == "angled":
+        out.append(
+            "The camera is only partly side-on, so fore/aft measurements are "
+            "compressed and will read lower than reality. Square the camera up "
+            "to the line of the shot for the most accurate scoring.")
+
+    if ctx.leg_source == "stated":
+        inferred = biomechanics.inferred_kick_side(frames)
+        if inferred != ctx.kick_side and ctx.leg_confidence > 0.5:
+            out.append(
+                f"You selected {ctx.kick_side}-footed, but in these frames the "
+                f"{inferred} leg is the one swinging. Using your selection. If the "
+                "results look mirrored, check the setting or your frame picks.")
+    elif ctx.leg_confidence < 0.35:
+        out.append("The two legs looked similar in this view, so the kicking-leg "
+                   "call is uncertain — set your strong foot explicitly for a "
+                   "reliable read.")
+
+    contact_ball = frames["contact"]["ball"]
+    if contact_ball:
+        d = analysis.foot_to_ball_distance(frames["contact"]["pts"], contact_ball)
+        if d is not None and d > CONTACT_NEAR_TORSO:
+            out.append(
+                f"At your contact frame the nearest foot is {d:.2f} torso lengths "
+                "from the ball, so this may not be the moment of the strike. Every "
+                "contact metric assumes it is — worth re-picking.")
+    else:
+        out.append("No ball was tracked at contact, so ball-relative metrics were "
+                   "skipped. A clearer view of the ball improves this.")
+
+    for p in PHASES:
+        shifted = per_phase[p].get("shifted_ms", 0)
+        if shifted:
+            out.append(f"{PHASE_LABEL[p]}: the exact instant you picked was unreadable, "
+                       f"so the nearest clean frame ({shifted:+d}ms) was used.")
+    return out
