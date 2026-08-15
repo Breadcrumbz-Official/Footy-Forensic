@@ -1,0 +1,63 @@
+/* Deliberately barebones — functionality first. */
+* { box-sizing: border-box; }
+body {
+  font: 16px/1.45 system-ui, sans-serif;
+  margin: 0 auto; padding: 12px; max-width: 900px;
+}
+h1 { font-size: 1.4rem; margin: .2em 0; }
+h2 { font-size: 1.1rem; margin: 1em 0 .4em; }
+h3 { font-size: .95rem; margin: .3em 0; }
+section { border-top: 1px solid #ccc; padding-top: 8px; margin-top: 8px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+button { padding: 8px 10px; cursor: pointer; }
+button:disabled { opacity: .45; cursor: default; }
+video { width: 100%; max-height: 55vh; background: #000; display: block; }
+
+.camWrap { position: relative; }
+.camWrap.mirrored { transform: scaleX(-1); } /* cosmetic only — recorded/analyzed frames are never mirrored */
+#camOverlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+
+.filmstrip {
+  position: relative; height: 64px; overflow: hidden; margin-top: 4px;
+  background: #000; touch-action: none; cursor: grab; user-select: none;
+}
+.filmstrip.scrubbing { cursor: grabbing; }
+.filmstripTrack { position: absolute; top: 0; left: 0; height: 100%; display: flex; }
+.filmstripTrack canvas { height: 100%; width: auto; display: block; flex-shrink: 0; }
+.filmstripPlayhead {
+  position: absolute; top: 0; bottom: 0; left: 50%; width: 2px;
+  background: #ff0; margin-left: -1px; pointer-events: none;
+}
+canvas.thumb { width: 100%; background: #000; display: block; }
+.muted { color: #666; font-size: .85rem; }
+.pstat.err { color: #a00; font-weight: 600; }
+.mono { font-family: ui-monospace, monospace; font-size: .85rem; }
+.msg { color: #a00; font-size: .85rem; min-height: 1.2em; margin: 4px 0; }
+
+#phaseGrid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.phase { border: 1px solid #ccc; padding: 8px; }
+.phase.done { border-color: #2a2; }
+.clipRow { margin: 6px 0; }
+.clipRow button { padding: 4px 8px; font-size: .8rem; }
+.clipStat { margin: 2px 0 8px; }
+
+#phaseCards .card { border: 1px solid #ccc; padding: 8px; margin: 10px 0; }
+#phaseCards .card .body { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.metric { border-top: 1px dotted #ccc; padding: 6px 0; }
+.metric .head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.metric .name { font-weight: 600; }
+.metric .val { font-family: ui-monospace, monospace; font-size: .8rem; color: #555; }
+.metric p { margin: 2px 0; font-size: .9rem; }
+.metric .tip { color: #04a; }
+.bar { height: 6px; background: #eee; margin-top: 3px; }
+.bar > i { display: block; height: 100%; background: #888; }
+#overall { font-size: 1.1rem; margin: 8px 0; }
+#overall .big { font-size: 2rem; font-weight: 700; }
+.two { display: grid; grid-template-columns: 1fr; gap: 10px; font-size: .85rem; }
+details { margin: 12px 0; }
+
+@media (min-width: 700px) {
+  #phaseGrid { grid-template-columns: repeat(3, 1fr); }
+  #phaseCards .card .body { grid-template-columns: 260px 1fr; }
+  .two { grid-template-columns: 1fr 1fr; }
+}
