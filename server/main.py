@@ -1,4 +1,4 @@
-"""Soccer Form AI — analysis server.
+"""Foot Form — analysis server.
 
 The browser captures the video, shows the live skeleton/ball overlay, and lets
 the user pick three moments. Everything after that happens here: decoding at
@@ -100,7 +100,7 @@ async def lifespan(_app: FastAPI):
         _pool.shutdown(wait=False, cancel_futures=True)
 
 
-app = FastAPI(title="Soccer Form AI", version="2.0", lifespan=lifespan)
+app = FastAPI(title="Foot Form", version="2.0", lifespan=lifespan)
 
 # The browser page is served from somewhere else entirely (a local static
 # server, GitHub Pages, wherever) and reaches this through an ngrok URL, so the

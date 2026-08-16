@@ -1,4 +1,4 @@
-# Soccer Form AI Server — Deployment Guide
+# Foot Form Server — Deployment Guide
 
 ## What You Need
 
