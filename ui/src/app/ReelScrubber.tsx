@@ -1,24 +1,3 @@
-/* ReelScrubber.tsx — the iPhone-style filmstrip used to pick each phase.
- *
- * A horizontally scrollable strip of real video thumbnails. A fixed marker at
- * the horizontal centre of the viewport is the capture window; the person drags
- * the film underneath it, exactly like scrubbing in iOS Photos. Scroll position
- * IS the value — there is no separate state to keep in sync — which is what
- * makes dragging feel native.
- *
- * Three things this has to get right:
- *
- *  - Cheap scrolling. The thumbnails are their own memoised component, so a
- *    scroll never re-renders up to 90 <img> elements, and the value is reported
- *    to the parent at most once per animation frame instead of once per scroll
- *    event. Without both, dragging stutters badly.
- *  - Following playback. While the video plays, the film scrolls to keep the
- *    playhead under the marker, without that programmatic scroll being mistaken
- *    for the user dragging.
- *  - Showing the other phases. Every phase's window is drawn on the strip, so
- *    when you move to Contact you can still see where Plant was set.
- */
-
 import { memo, useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 export interface ReelMarker {
@@ -28,12 +7,11 @@ export interface ReelMarker {
   start: number;
   end: number;
   active: boolean;
-  /** False until the user has actually visited and set this phase. */
+  
   set: boolean;
 }
 
-/** The filmstrip itself. Memoised: it depends only on the images and geometry,
- *  never on the scroll position, so dragging does not re-render it. */
+
 const Filmstrip = memo(function Filmstrip({
   thumbnails,
   filmWidth,
@@ -97,7 +75,7 @@ export function ReelScrubber({
   color: string;
   windowSeconds: number;
   markers: ReelMarker[];
-  /** Non-null while the video is playing: the film follows it. */
+  
   playheadTime: number | null;
   containerWidth: number;
   onMeasure: (width: number) => void;
@@ -108,8 +86,8 @@ export function ReelScrubber({
   const dragStartX = useRef(0);
   const dragStartScroll = useRef(0);
   const rafPending = useRef(false);
-  // The value this component last reported or was told to show. Lets us skip
-  // redundant scroll writes, which would otherwise fight the user mid-drag.
+  
+  
   const committed = useRef(value);
 
   const maxStart = Math.max(0, duration - windowSeconds);
@@ -130,7 +108,7 @@ export function ReelScrubber({
     return () => window.removeEventListener("resize", onResize);
   }, [onMeasure]);
 
-  /** Scroll the film to `t` without that being read back as a user drag. */
+  
   const scrollToTime = useCallback((t: number) => {
     const el = outerRef.current;
     if (!el) return;
@@ -140,32 +118,28 @@ export function ReelScrubber({
     requestAnimationFrame(() => { suppressScroll.current = false; });
   }, [pxPerSecond]);
 
-  // Position on mount and whenever the layout that defines the mapping changes
-  // (viewport width, zoom level, window length).
+  
   useLayoutEffect(() => {
     if (containerWidth === 0) return;
     scrollToTime(value);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    
   }, [containerWidth, pxPerSecond, windowSeconds]);
 
-  // Follow playback. Skipped while the user is dragging — their hand wins.
+  
   useEffect(() => {
     if (playheadTime === null || dragging.current || containerWidth === 0) return;
     if (Math.abs(playheadTime - committed.current) < 0.005) return;
     scrollToTime(Math.min(playheadTime, maxStart));
   }, [playheadTime, containerWidth, maxStart, scrollToTime]);
 
-  // Externally driven value changes (phase switch, Reset, arrow keys).
+  
   useEffect(() => {
     if (dragging.current || playheadTime !== null || containerWidth === 0) return;
     if (Math.abs(value - committed.current) < 1e-4) return;
     scrollToTime(value);
   }, [value, playheadTime, containerWidth, scrollToTime]);
 
-  // Scroll events fire far faster than we can usefully do anything with them,
-  // and each one that reaches React re-renders the page and seeks the video.
-  // Collapsing to one per frame is what makes dragging feel immediate rather
-  // than syrupy — the browser is already painting the film at native speed.
+  
   const handleScroll = () => {
     if (suppressScroll.current || rafPending.current) return;
     rafPending.current = true;
@@ -194,11 +168,8 @@ export function ReelScrubber({
   const endDrag = () => { dragging.current = false; };
 
   return (
-    // overflow-hidden here (not just on the scroll child below, which only
-    // clips the X axis) contains the active-window spotlight's box-shadow —
-    // its 9999px spread is what paints the dimmed area outside the capture
-    // window, and with nothing clipping the Y axis that shadow bled past the
-    // ~80px-tall strip and darkened the entire page above and below it.
+    
+    
     <div className="relative select-none overflow-hidden">
       <div
         ref={outerRef}
@@ -219,9 +190,7 @@ export function ReelScrubber({
             padRight={padRight}
           />
 
-          {/* Every phase's window, drawn on the film so the ones you already
-              set stay visible while you work on the next. The active phase is
-              handled by the fixed centre marker below, so it is skipped here. */}
+          
           {markers.filter(m => !m.active && m.set).map(m => (
             <div
               key={m.key}
@@ -244,7 +213,7 @@ export function ReelScrubber({
         </div>
       </div>
 
-      {/* Active window: fixed at the centre, the film moves under it. */}
+      
       {containerWidth > 0 && (
         <>
           <div

@@ -1,19 +1,6 @@
-/* api.ts — talks to the analysis server.
- *
- * The browser scores nothing. It captures the video and lets the user pick
- * three moments; the server decodes at full resolution, runs the heavy pose
- * model and the ball tracker, and returns the finished analysis.
- * See server/main.py and server/scoring.py for the shapes below.
- *
- * The page is served by that same server, so the default base URL is empty —
- * every request is same-origin and there is nothing for the user to configure.
- * The localStorage override exists for `vite dev`, where the page is on :5173
- * and the API is not.
- */
-
 const KEY = 'sfai.serverUrl';
 
-/** Empty string means same origin, which is the normal case in production. */
+
 export const getServerUrl = () => localStorage.getItem(KEY) || '';
 
 export function setServerUrl(url: string) {
@@ -23,7 +10,6 @@ export function setServerUrl(url: string) {
   return clean;
 }
 
-/* ── Server response shapes ──────────────────────────────────────────────── */
 
 export type PhaseKey = 'plant' | 'contact' | 'followThrough';
 
@@ -45,9 +31,9 @@ export interface Metric {
   ideal: [number, number];
   idealText: string;
   valueText: string | null;
-  /** Absent when the metric could not be scored. */
+  
   score?: number;
-  /** Reported but excluded from the phase score. */
+  
   uncertain?: boolean;
   reason?: string | null;
   feedback?: Feedback;
@@ -58,7 +44,7 @@ export interface Phase {
   label: string;
   weight: number;
   metrics: Metric[];
-  /** null when coverage was too low to publish a number at all. */
+  
   score: number | null;
   counted: number;
   skipped: number;
@@ -82,10 +68,9 @@ export interface FrameOut {
   ball: Ball | null;
   ballFramesFound: number;
   clipFrames: number;
-  /** True when MediaPipe's skeleton failed the alignment check and this frame
-   *  was re-detected with the fallback pose model. */
+  
   reposed?: boolean;
-  /** data:image/jpeg;base64,... — the annotated frame the server drew. */
+  
   image: string;
 }
 
@@ -96,7 +81,7 @@ export interface Context {
   dirSource: string;
   legConfidence: number;
   legSource: string;
-  /** shoulderRatio is null when the torso was too degenerate to measure. */
+  
   view: { score: number; shoulderRatio: number | null; label: string };
 }
 
@@ -107,10 +92,7 @@ export interface AnalysisResult {
   frames: Record<PhaseKey, FrameOut>;
   warnings: string[];
   video: Record<string, unknown>;
-  /** One short freeform paragraph per phase from Gemini, grounded in the same
-   *  measurements as the rule-based score. Absent (or a phase missing from
-   *  it) when GEMINI_API_KEY isn't configured server-side, or that call
-   *  failed — never required for the rest of the report to work. */
+  
   aiFeedback: Partial<Record<PhaseKey, string>> | null;
   timing: { decodeMs: number; detectMs: number; verifyMs?: number; aiMs?: number; totalMs: number };
 }
@@ -122,8 +104,7 @@ export interface Health {
   ballModel: string;
   maxUploadMb: number;
   maxEdge: number;
-  /** Whether the server has a GEMINI_API_KEY configured — i.e. whether phase
-   *  frames get forwarded to Gemini for AI coaching text. */
+  
   aiFeedback: boolean;
 }
 
@@ -131,17 +112,10 @@ export interface AnalyseSpec {
   phases: Record<PhaseKey, { time: number; clip?: { start: number; end: number } }>;
   fps: number;
   footedness: 'auto' | 'left' | 'right';
-  /**
-   * The duration this browser measured for the video. The server lays the
-   * decoded frames evenly across it instead of trusting the container's
-   * declared frame rate, which is what keeps the picked times meaning the same
-   * thing on both sides. Without it, picks near the end of a variable-rate
-   * recording fall off the end of the server's timeline and return no frames.
-   */
+  
   duration: number;
 }
 
-/* ── Calls ───────────────────────────────────────────────────────────────── */
 
 export class ApiError extends Error {
   status: number;
@@ -154,13 +128,10 @@ export class ApiError extends Error {
   }
 }
 
-// ngrok's free tier serves a browser interstitial unless this is set, which
-// would otherwise come back as HTML and fail JSON parsing with a confusing
-// error. Harmless on any other host.
+
 const NGROK_HEADER = { 'ngrok-skip-browser-warning': 'true' } as const;
 
-/** Ask the server what it is and whether it is up. Short timeout so a wrong
- *  URL fails fast rather than hanging. */
+
 export async function checkHealth(url = getServerUrl(), { timeoutMs = 8000 } = {}): Promise<Health> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -177,13 +148,7 @@ export async function checkHealth(url = getServerUrl(), { timeoutMs = 8000 } = {
   }
 }
 
-/**
- * Upload the video and the three picks, get the analysis back.
- *
- * XMLHttpRequest rather than fetch purely for `upload.onprogress` — over a
- * tunnel the upload is the slow part, and a progress bar is the difference
- * between "working" and "frozen" from the user's side.
- */
+
 export function analyze(
   videoBlob: Blob,
   spec: AnalyseSpec,
@@ -199,18 +164,18 @@ export function analyze(
     xhr.open('POST', `${url}/analyze`);
     xhr.responseType = 'json';
     xhr.setRequestHeader('ngrok-skip-browser-warning', 'true');
-    xhr.timeout = 10 * 60 * 1000;   // the heavy model on a cold worker is not fast
+    xhr.timeout = 10 * 60 * 1000;   
 
     xhr.upload.onprogress = e => {
       if (e.lengthComputable) onProgress?.(e.loaded / e.total, 'upload');
     };
-    // Upload finished; everything from here is the server thinking.
+    
     xhr.upload.onload = () => onProgress?.(1, 'analyze');
 
     xhr.onload = () => {
       const body = xhr.response;
       if (xhr.status >= 200 && xhr.status < 300) return resolve(body as AnalysisResult);
-      // FastAPI puts the readable part in `detail`.
+      
       const detail = body?.detail ?? body;
       reject(new ApiError(
         typeof detail === 'string' ? detail : `Server error ${xhr.status}.`,

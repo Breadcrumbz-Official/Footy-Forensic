@@ -1,12 +1,3 @@
-"""Preflight check — run this on a new machine BEFORE starting the server.
-
-    python check_env.py
-
-Verifies the interpreter, every dependency, the model cache, and that the two
-MediaPipe graphs actually build and run. Failing here with a clear message beats
-failing on a user's first upload with a stack trace.
-"""
-
 from __future__ import annotations
 
 import multiprocessing
@@ -31,7 +22,6 @@ def main() -> int:
     print(f"  {platform.python_implementation()} {platform.python_version()} "
           f"on {platform.system()} {platform.machine()}")
 
-    # ── Interpreter ────────────────────────────────────────────────────────
     if sys.version_info < (3, 9):
         fail(f"Python {platform.python_version()} is too old.",
              "Install Python 3.10-3.12 and recreate the virtualenv.")
@@ -43,7 +33,6 @@ def main() -> int:
         print("         If install failed, use: pip install 'mediapipe==0.10.14' "
               "(needs Python <= 3.12)")
 
-    # ── Dependencies ───────────────────────────────────────────────────────
     deps = [
         ("fastapi", "fastapi"),
         ("uvicorn", "uvicorn"),
@@ -61,7 +50,7 @@ def main() -> int:
             hint = ("On a headless Linux box use opencv-python-headless instead."
                     if mod == "cv2" else "pip install -r requirements.txt")
             fail(f"{pkg} missing or broken ({e}).", hint)
-        except Exception as e:  # e.g. libGL.so.1 on headless Linux
+        except Exception as e:
             fail(f"{pkg} imported but raised {type(e).__name__}: {e}",
                  "On headless Linux: pip uninstall opencv-python && "
                  "pip install opencv-python-headless")
@@ -69,7 +58,6 @@ def main() -> int:
     if problems:
         return report()
 
-    # ── Models ─────────────────────────────────────────────────────────────
     import models_cache
     print(f"  model cache: {models_cache.CACHE_DIR}")
     try:
@@ -87,7 +75,6 @@ def main() -> int:
              "existing server/models/ folder across and re-run.")
         return report()
 
-    # ── The graphs actually building and running ───────────────────────────
     import numpy as np
     frame = np.zeros((360, 240, 3), dtype=np.uint8)
 
@@ -117,7 +104,6 @@ def main() -> int:
         fail(f"ObjectDetector failed to build/run ({type(e).__name__}: {e}).",
              "Usually a mediapipe/protobuf version clash — recreate the venv.")
 
-    # ── Capacity ───────────────────────────────────────────────────────────
     cores = multiprocessing.cpu_count()
     workers = int(os.environ.get("SFAI_WORKERS", "3"))
     print(f"  {cores} logical cores, SFAI_WORKERS={workers}")

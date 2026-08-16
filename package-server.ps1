@@ -1,16 +1,11 @@
-# Package the server for deployment to another machine
-# Run from the soccer-form-ai/ directory
-
 param(
     [string]$Dest = "server-deployment"
 )
 
 $src = "server"
 
-# Create destination
 New-Item -ItemType Directory -Path $Dest -Force | Out-Null
 
-# Copy Python files (not __pycache__)
 @(
     "main.py",
     "worker.py",
@@ -33,7 +28,6 @@ New-Item -ItemType Directory -Path $Dest -Force | Out-Null
     }
 }
 
-# Copy models/ if it exists (optional)
 $models = Join-Path $src "models"
 if (Test-Path $models) {
     Copy-Item $models $Dest -Recurse -Force
@@ -42,7 +36,6 @@ if (Test-Path $models) {
     Write-Host "[skip] models/ (will download on first run)"
 }
 
-# Create a README for deployment
 @"
 # Soccer Form AI Server
 

@@ -1,14 +1,3 @@
-"""Decoding and clip extraction.
-
-Frames are pulled in ONE sequential pass rather than by seeking. Per-frame
-seeking with OpenCV is unreliable across containers and codecs — with a
-MediaRecorder WebM in particular, `CAP_PROP_POS_MSEC` seeks land on the wrong
-frame or silently no-op — and the browser has already paid that cost once to
-let the user pick their moments. A single forward decode keeping only the
-frames that fall inside a requested window is both exact and cheap, because the
-windows together cover well under a second of a clip that is at most ten.
-"""
-
 from __future__ import annotations
 
 import math
@@ -17,11 +6,7 @@ import os
 import cv2
 import numpy as np
 
-# Guard against someone uploading 4K: MediaPipe downsamples internally anyway,
-# so beyond this we are paying memory and decode time for nothing. Still far
-# above the 720p the browser build captured at.
 MAX_EDGE = int(os.environ.get("SFAI_MAX_EDGE", "1920"))
-# Safety cap if a user drags a very wide manual range.
 MAX_CLIP_FRAMES = 60
 
 
@@ -34,9 +19,6 @@ def probe(path: str) -> dict:
     if not cap.isOpened():
         raise VideoError("Could not open this video — the format may be unsupported.")
     try:
-        # `x or 0.0` is not enough: OpenCV reports NaN for these on some
-        # containers (MediaRecorder WebM among them), and NaN is truthy, so it
-        # would pass straight through and later fail JSON encoding.
         fps = _finite_or(cap.get(cv2.CAP_PROP_FPS), 0.0)
         count = _finite_or(cap.get(cv2.CAP_PROP_FRAME_COUNT), 0.0)
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
@@ -48,7 +30,6 @@ def probe(path: str) -> dict:
 
 
 def _finite_or(value, default: float) -> float:
-    """OpenCV property reads come back as NaN or inf on some containers."""
     try:
         v = float(value)
     except (TypeError, ValueError):
@@ -65,12 +46,6 @@ def _downscale(frame: np.ndarray) -> np.ndarray:
 
 
 def count_frames(path: str) -> int:
-    """Number of frames actually decodable from this file.
-
-    `grab()` advances without converting the frame to a numpy array, so this is
-    far cheaper than a real decode — worth paying to learn the true length of a
-    file whose metadata lies.
-    """
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise VideoError("Could not open this video — the format may be unsupported.")
@@ -86,27 +61,6 @@ def count_frames(path: str) -> int:
 def extract_clips(path: str, windows: dict[str, tuple[float, float]],
                   fallback_fps: float = 30.0,
                   source_duration: float | None = None) -> dict[str, list[dict]]:
-    """Pull the frames falling inside each named [start, end] window.
-
-    Returns {name: [{"image": BGR ndarray, "time": seconds}, ...]} ordered by
-    time. A window that captured nothing comes back as an empty list rather
-    than raising, so one bad phase pick does not lose the other two.
-
-    `source_duration` is the length the BROWSER measured, and the requested
-    windows are points on that timeline. It matters because this function builds
-    its own timeline as `frame_index / fps`, and the two disagree whenever the
-    container's declared frame rate is not the rate it was actually captured at
-    — which is the normal case for MediaRecorder WebM, where the camera is free
-    to deliver frames irregularly while the header still claims a flat 30fps.
-    Twenty seconds of real footage then reads as fifteen here, every pick lands
-    earlier than the user intended, and picks near the end fall off the end of
-    the timeline entirely and return no frames at all.
-
-    Given the browser's duration we can sidestep the declared rate completely:
-    count the frames that actually decode, and lay them evenly across that
-    duration. That is exact for constant-rate video and much closer than the
-    header for variable-rate video.
-    """
     fps = 0.0
     if source_duration and math.isfinite(source_duration) and source_duration > 0:
         n = count_frames(path)
@@ -122,7 +76,6 @@ def extract_clips(path: str, windows: dict[str, tuple[float, float]],
     if not (fps > 0) or not math.isfinite(fps):
         fps = fallback_fps
 
-    # Clamp to the widest span we actually need, so we can stop decoding early.
     latest = max((w[1] for w in windows.values()), default=0.0)
     out: dict[str, list[dict]] = {name: [] for name in windows}
 
@@ -132,8 +85,6 @@ def extract_clips(path: str, windows: dict[str, tuple[float, float]],
             ok, frame = cap.read()
             if not ok:
                 break
-            # Frame index / fps is stable where CAP_PROP_POS_MSEC is not: some
-            # WebM files report 0 for every frame's timestamp.
             t = idx / fps
             idx += 1
             if t > latest + (1.0 / fps):
@@ -153,7 +104,6 @@ def extract_clips(path: str, windows: dict[str, tuple[float, float]],
 
 
 def nearest_index(frames: list[dict], t: float) -> int:
-    """Index of the frame closest to `t`; 0 for an empty list."""
     if not frames:
         return 0
     return min(range(len(frames)), key=lambda i: abs(frames[i]["time"] - t))

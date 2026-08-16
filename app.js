@@ -1,11 +1,3 @@
-/* app.js — UI wiring for Soccer Form AI.
- *
- * The browser's job: capture or load a video, show a live skeleton/ball overlay
- * while filming, let the user scrub and pick three moments, then hand the whole
- * thing to the analysis server and render what comes back. It does not measure
- * or score anything — that all lives in server/ so there is one copy of it.
- */
-
 import { Recorder, loadVideo, seekTo, captureFrame } from './js/video.js';
 import { initPose, detectPoseLive, resetLiveClock, getBackend } from './js/mediapipe.js';
 import { initBall, detectBallLive, resetBallLive, getBallBackend } from './js/ballDetection.js';
@@ -20,11 +12,11 @@ const PHASE_LABEL = { plant: 'Plant + Backswing', contact: 'Contact', followThro
 const video = $('#video');
 const recorder = new Recorder();
 
-/** The video currently loaded, kept so it can be uploaded on analyze. */
+
 let sourceBlob = null;
-/** picks[phase] = { time } — just a timestamp now; the server cuts the clip. */
+
 let picks = { plant: null, contact: null, followThrough: null };
-/** clipBounds[phase] = { start, end } in seconds, or nulls for the automatic window */
+
 let clipBounds = {
   plant: { start: null, end: null },
   contact: { start: null, end: null },
@@ -32,7 +24,6 @@ let clipBounds = {
 };
 let serverInfo = null;
 
-/* ── Live-preview engines (browser-side only) ───────────────────────────── */
 
 const engine = { pose: 'loading…', ball: 'loading…' };
 const renderEngineStatus = () =>
@@ -44,18 +35,12 @@ initPose()
   .catch(err => { console.error(err); engine.pose = 'unavailable'; })
   .finally(renderEngineStatus);
 
-// Both live engines are strictly optional: they drive the recording overlay
-// only. If either fails to load the app still records and still analyzes,
-// because the real work happens on the server.
+
 initBall()
   .then(() => { engine.ball = `ready (${getBallBackend()})`; })
   .catch(err => { console.warn('Live ball detector unavailable:', err); engine.ball = 'unavailable'; })
   .finally(renderEngineStatus);
 
-/* ── Server connection ──────────────────────────────────────────────────── */
-// The server address is fixed (js/api.js) — nothing for the user to type or
-// click here. Just confirm it's reachable, quietly, and keep retrying in the
-// background until it is: an ngrok tunnel can take a few seconds to wake up.
 
 async function connectServer() {
   try {
@@ -77,7 +62,6 @@ function setServerStatus(text, kind) {
 
 connectServer();
 
-/* ── Video input ────────────────────────────────────────────────────────── */
 
 $('#fileInput').addEventListener('change', async e => {
   const file = e.target.files?.[0];
@@ -104,7 +88,7 @@ $('#btnFlip').addEventListener('click', async () => {
   try {
     const mode = await recorder.switchCamera($('#camPreview'));
     $('#camWrap').classList.toggle('mirrored', mode === 'user');
-    sizeCamOverlay(); // front/back sensors can report different resolutions
+    sizeCamOverlay(); 
     msg('#inputMsg', `Switched to the ${mode === 'user' ? 'front' : 'back'} camera.`, false);
   } catch (err) {
     msg('#inputMsg', `Could not switch camera — reconnected to the previous one. (${err.message})`);
@@ -115,7 +99,7 @@ $('#btnFlip').addEventListener('click', async () => {
 
 $('#btnRec').addEventListener('click', async () => {
   $('#btnRec').disabled = true;
-  $('#btnFlip').disabled = true; // switching mid-recording would kill the stream it's recording from
+  $('#btnFlip').disabled = true; 
   $('#btnStop').disabled = false;
   msg('#inputMsg', '', false);
 
@@ -139,28 +123,13 @@ $('#btnRec').addEventListener('click', async () => {
 
 $('#btnStop').addEventListener('click', () => recorder.stop());
 
-/* ── Live skeleton / angle / ball overlay ───────────────────────────────── */
 
-// Pose runs every tick; ball runs on a much slower cadence. Object detection
-// costs several times what pose does — measured around half a second per
-// frame on CPU, versus pose's GPU-driven ~33ms — and letting it share the
-// pose budget would drop the skeleton to a stutter, which is the part you
-// actually frame the shot with. That gap can't be closed by asking the model
-// for more frames; the fix is to not need more of them. Each tick, instead of
-// redrawing the last detection frozen in place (a hold-then-jump that looks
-// broken next to the buttery skeleton), we extrapolate along the ball's last
-// known velocity — the same dead-reckoning trick video game netcode uses to
-// hide a sparse, laggy signal. See getSmoothedBall below.
-const LIVE_INTERVAL_MS = 33;    // ~30 pose detections/sec ceiling
-const BALL_INTERVAL_MS = 200;   // ball detection ceiling; actual rate is
-                                 // slower and self-limited by ballBusy below
-const BALL_EXTRAPOLATE_MAX_MS = 350; // stop projecting motion past this long
-                                      // since the last real detection — a
-                                      // ball that's been unseen this long
-                                      // isn't still traveling in a straight
-                                      // line, and holding position (rather
-                                      // than flying off-screen) reads better
-
+const LIVE_INTERVAL_MS = 33;    
+const BALL_INTERVAL_MS = 200;   
+                                 
+const BALL_EXTRAPOLATE_MAX_MS = 350; 
+                                      
+                                      
 let liveShowSkeleton = false;
 let liveShowAngles = false;
 let liveShowBall = false;
@@ -168,8 +137,8 @@ let liveTimer = null;
 let liveBusy = false;
 let ballBusy = false;
 let lastBallAt = 0;
-let ballPrev = null;   // {x, y, r, t} — the detection before ballCurr
-let ballCurr = null;   // {x, y, r, t} — most recent real detection
+let ballPrev = null;   
+let ballCurr = null;   
 let lastViewLabel = null;
 
 const liveOverlayWanted = () => liveShowSkeleton || liveShowAngles || liveShowBall;
@@ -191,7 +160,7 @@ function startLiveLoop() {
   lastBallAt = 0;
 
   liveTimer = setInterval(async () => {
-    if (liveBusy) return; // previous detection still running — don't pile up
+    if (liveBusy) return; 
     const camPreview = $('#camPreview');
     if (camPreview.hidden || !camPreview.videoWidth) return;
     liveBusy = true;
@@ -220,8 +189,7 @@ function startLiveLoop() {
   }, LIVE_INTERVAL_MS);
 }
 
-/** Kick off a ball detection if one is due and none is in flight. Deliberately
- *  not awaited: the pose tick must not wait on it. */
+
 function maybeDetectBall(frame, scale, overlay) {
   const now = performance.now();
   if (ballBusy || now - lastBallAt < BALL_INTERVAL_MS) return;
@@ -231,19 +199,15 @@ function maybeDetectBall(frame, scale, overlay) {
     .then(b => {
       const t = performance.now();
       if (b) { ballPrev = ballCurr; ballCurr = { ...b, t }; }
-      // A real miss (ball genuinely gone, per detectBallLive's own forget
-      // logic) — stop extrapolating rather than fly a phantom ring onward.
+      
+      
       else { ballPrev = ballCurr = null; }
     })
     .catch(err => { console.warn('live ball:', err); ballPrev = ballCurr = null; })
     .finally(() => { ballBusy = false; });
 }
 
-/** What to draw *this* render tick, given detections that only land every
- *  BALL_INTERVAL_MS-or-slower. With two real samples we know a velocity;
- *  project the ball forward along it for the (up to ~30) ticks between them,
- *  so the ring glides instead of teleporting. One sample, or a stale pair, and
- *  there's nothing honest to extrapolate — just hold position. */
+
 function getSmoothedBall(now) {
   if (!ballCurr) return null;
   if (!ballPrev) return ballCurr;
@@ -255,16 +219,14 @@ function getSmoothedBall(now) {
   return { x: ballCurr.x + vx * elapsed, y: ballCurr.y + vy * elapsed, r: ballCurr.r };
 }
 
-/** The ball comes back in the captured frame's pixel space; the overlay canvas
- *  may be a different size. */
+
 function scaleBall(ball, frame, overlay) {
   if (!ball) return null;
   const k = overlay.width / frame.width;
   return { x: ball.x * k, y: ball.y * k, r: ball.r * k };
 }
 
-// Tell the player the camera angle is wrong while they can still move it,
-// rather than letting the server report unscoreable metrics afterwards.
+
 function updateViewHint(pts) {
   const v = viewQuality(pts);
   if (v.label === lastViewLabel) return;
@@ -300,7 +262,6 @@ bindLiveToggle('#chkLiveSkeleton', v => { liveShowSkeleton = v; });
 bindLiveToggle('#chkLiveAngles', v => { liveShowAngles = v; });
 bindLiveToggle('#chkLiveBall', v => { liveShowBall = v; });
 
-/* ── Loading a video ────────────────────────────────────────────────────── */
 
 async function useVideo(blob) {
   try {
@@ -324,7 +285,6 @@ async function useVideo(blob) {
   }
 }
 
-/* ── Playback + scrubbing ───────────────────────────────────────────────── */
 
 const frameStep = () => 1 / Math.max(1, Number($('#fps').value) || 30);
 
@@ -351,12 +311,7 @@ $('#btnBack1').addEventListener('click', () => step(-1));
 $('#btnFwd1').addEventListener('click', () => step(1));
 $('#btnFwd10').addEventListener('click', () => step(10));
 
-/* ── Filmstrip scrubbing (phone-gallery style) ──────────────────────────── */
 
-// Seeks are async and dragging fires far faster than they can resolve. Rather
-// than queue every intermediate position (which would lag behind the pointer),
-// track only the latest requested time; each seek that finishes immediately
-// starts the next one toward wherever the pointer is *now*.
 let scrubTarget = null;
 let scrubBusy = false;
 async function scrubTo(t) {
@@ -378,12 +333,7 @@ const filmstripTrack = $('#filmstripTrack');
 let filmstripWidth = 0;
 let filmstripDuration = 0;
 
-/**
- * A row of thumbnails spanning the whole video, generated once per load. The
- * strip is positioned so the thumbnail for the current time sits under the
- * fixed centre playhead — dragging it left brings later frames under that
- * playhead, exactly like the iOS/Android photo-gallery scrubber.
- */
+
 async function buildFilmstrip(duration) {
   filmstripTrack.innerHTML = '';
   filmstripTrack.style.transform = '';
@@ -435,8 +385,8 @@ function stripDragBegin(clientX) {
 function stripDragMove(clientX) {
   if (!stripDragging) return;
   const pxPerSecond = filmstripWidth / filmstripDuration;
-  // Dragging left pulls later thumbnails under the fixed centre playhead —
-  // same convention as a native photo-gallery scrubber.
+  
+  
   scrubTo(stripStartTime - (clientX - stripStartX) / pxPerSecond);
 }
 function stripDragEnd() {
@@ -470,7 +420,6 @@ document.addEventListener('keydown', e => {
   if (e.key === ' ') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
 });
 
-/* ── Frame selection ────────────────────────────────────────────────────── */
 
 function clipStatText(b) {
   if (b.start == null && b.end == null) return 'clip: auto (±0.13s around your pick)';
@@ -488,9 +437,7 @@ function refreshClipStat(phase, el) {
 document.querySelectorAll('.phase').forEach(el => {
   const phase = el.dataset.phase;
 
-  // Selecting is instant now: grab a plain thumbnail and remember the time.
-  // The server re-cuts the clip from the original video at full resolution,
-  // so there is nothing for the browser to detect here.
+  
   el.querySelector('.btnSel').addEventListener('click', () => {
     video.pause();
     picks[phase] = { time: video.currentTime };
@@ -526,8 +473,7 @@ document.querySelectorAll('.phase').forEach(el => {
     refreshAnalyzeButton();
   });
 
-  // Manual clip boundaries: scrub to a point and mark it as the start or end of
-  // the clip this phase is read from, instead of the automatic ±0.13s window.
+  
   el.querySelector('.btnClipStart').addEventListener('click', () => {
     clipBounds[phase].start = video.currentTime;
     refreshClipStat(phase, el);
@@ -569,7 +515,6 @@ function resetSelections() {
   refreshAnalyzeButton();
 }
 
-/* ── Analysis (server) ──────────────────────────────────────────────────── */
 
 $('#btnAnalyze').addEventListener('click', async () => {
   const btn = $('#btnAnalyze');
@@ -612,7 +557,6 @@ function setProgress(frac, text) {
   $('#progressMsg').textContent = text;
 }
 
-/* ── Results ────────────────────────────────────────────────────────────── */
 
 const grade = s => s == null ? '⚪' : s >= 85 ? '🟢' : s >= 70 ? '🟡' : '🔴';
 
@@ -701,15 +645,12 @@ function metricRow(mtr) {
   return div;
 }
 
-// Everything rendered above is server-authored, but it is still text going into
-// innerHTML — escape it rather than trusting the far end of a tunnel the user
-// typed the address of.
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-/* ── Misc ───────────────────────────────────────────────────────────────── */
 
 $('#btnRestart').addEventListener('click', () => {
   resetSelections();

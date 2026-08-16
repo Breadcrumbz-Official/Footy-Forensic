@@ -1,12 +1,3 @@
-"""What one worker process does for one phase: pose, then ball, then pick a frame.
-
-This lives in its own module because ProcessPoolExecutor has to import the
-target by name in the child process. Each child builds its own PoseSession and
-BallSession lazily on first use and then keeps them for the life of the
-process — constructing a MediaPipe graph costs far more than running one, so
-rebuilding per request would dominate the response time.
-"""
-
 from __future__ import annotations
 
 import numpy as np
@@ -31,12 +22,6 @@ def _sessions():
 
 
 def repose_frame(image):
-    """Re-detect one frame's landmarks with the fallback pose model.
-
-    Called only for frames the vision check flagged as having a skeleton that
-    is not on the player. Loaded lazily because most runs never need it, and
-    the weights are ~118MB per worker process.
-    """
     global _ypose
     import pose_yolo
     if _ypose is None:
@@ -48,13 +33,6 @@ def repose_frame(image):
 
 
 def analyse_phase(clip: list[dict], center_time: float) -> dict:
-    """Run pose and ball tracking across one clip and return the scored frame.
-
-    Prefer the exact frame the user picked. If that instant was too blurred or
-    occluded for a detection, fall back to the nearest frame in the clip that
-    did read — and report the shift, rather than silently substituting a
-    different moment.
-    """
     pose_s, ball_s = _sessions()
 
     landmark_sets = pose_s.detect_sequence(clip)
@@ -73,8 +51,6 @@ def analyse_phase(clip: list[dict], center_time: float) -> dict:
                     "clip_len": len(clip), "ball_found": 0, "shifted_ms": 0}
         idx = min(candidates, key=lambda i: abs(i - center_idx))
 
-    # Ball tracking is strictly additive: a failure here must never cost the
-    # user their frame, so it is contained.
     track = [None] * len(clip)
     try:
         track = ball_s.detect_sequence(clip, scales, all_pts)

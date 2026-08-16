@@ -1,26 +1,18 @@
-/* results.ts — turns a server AnalysisResult into what the report screen shows.
- *
- * Every number and every sentence here comes out of the response. The design
- * mockup this UI grew from carried a hardcoded score and canned coaching text;
- * nothing in this file invents a value. Where the server declined to measure
- * something, that is shown as "not measured" rather than filled in.
- */
-
 import type { AnalysisResult, Metric, Phase, PhaseKey } from './api';
 import { PHASE_KEYS } from './api';
 
-/** Status of a single metric, in the mockup's visual vocabulary. */
+
 export type MetricStatus = 'good' | 'warn' | 'bad' | 'unknown';
 
 export interface DisplayMetric {
   id: string;
   name: string;
-  /** Formatted by the server (e.g. "142°", "0.28 torso"), or null. */
+  
   value: string | null;
   ideal: string;
   status: MetricStatus;
   score: number | null;
-  /** Why it was not scored, when it was not. */
+  
   reason: string | null;
   caveat: string | null;
   what: string | null;
@@ -33,29 +25,24 @@ export interface DisplayPhase {
   label: string;
   color: string;
   score: number | null;
-  /** True when coverage was too low for the server to publish a score. */
+  
   insufficient: boolean;
   partial: boolean;
   counted: number;
   skipped: number;
   metrics: DisplayMetric[];
-  /** The annotated frame the server drew, as a data URL. */
+  
   image: string | null;
   time: number | null;
   shiftedMs: number;
   ballFound: boolean;
-  /** True when the first skeleton failed the alignment check and this frame was
-   *  re-detected with the fallback pose model. */
+  
   reposed: boolean;
-  /** Gemini's short freeform paragraph for this phase, or null if AI
-   *  feedback isn't configured server-side or that call didn't come back. */
+  
   aiNote: string | null;
 }
 
-/** Coaching text for one phase, kept separate from the next phase's rather
- *  than pooled — a plant-phase fix and a follow-through fix are different
- *  moments in the swing, and mixing them into one flat list buried which
- *  phase each line was even about. */
+
 export interface PhaseFeedback {
   key: PhaseKey;
   label: string;
@@ -79,7 +66,7 @@ export const PHASE_COLOR: Record<PhaseKey, string> = {
   followThrough: '#38bdf8',
 };
 
-/** Short label for the step-picker, matching the mockup's typography. */
+
 export const PHASE_SHORT: Record<PhaseKey, string> = {
   plant: 'PLANT',
   contact: 'CONTACT',
@@ -100,9 +87,8 @@ export function scoreColor(score: number | null): string {
 }
 
 function metricStatus(m: Metric): MetricStatus {
-  // `uncertain` covers occluded landmarks, degenerate geometry, low-confidence
-  // proxies and fore/aft metrics on a face-on camera. None of those are a bad
-  // kick, so none of them get a red dot.
+  
+  
   if (m.uncertain || m.score === undefined || m.score === null) return 'unknown';
   if (m.score >= 80) return 'good';
   if (m.score >= 60) return 'warn';
@@ -125,14 +111,7 @@ function toDisplayMetric(m: Metric): DisplayMetric {
   };
 }
 
-/**
- * Coaching text for one phase, taken verbatim from the server's rule set.
- *
- * Strengths are the metrics that scored well; improvements are the ones that
- * did not, worst first and weighted by how much the rule set cares about them,
- * so the top of the list is the thing most worth fixing. Unscored metrics
- * appear in neither — the server could not judge them, so nor can we.
- */
+
 function phaseCoaching(phase: Phase): { strengths: string[]; improvements: string[] } {
   const strengths: { text: string; rank: number }[] = [];
   const improvements: { text: string; rank: number }[] = [];

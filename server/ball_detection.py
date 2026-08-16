@@ -1,32 +1,3 @@
-"""Finds the ball in a clip — the server-side counterpart of js/ballDetection.js.
-
-One frame's raw detection is not trustworthy for this. The COCO "sports ball"
-class also fires on round-ish background clutter (in testing, on a stretched
-patch of grass at 0.33 confidence), and the frame that matters most — contact —
-is exactly where the ball is fastest, blurriest and most likely to be missed.
-Either failure would quietly corrupt a metric.
-
-So we read the WHOLE clip and pick the single most temporally coherent track
-through it, by Viterbi over each frame's candidates plus a "not visible here"
-state. A real ball moves a short smooth distance frame to frame; a false
-positive appears once somewhere unrelated and vanishes.
-
-Every gate is expressed relative to the player's own torso length as measured
-by the pose model on that same frame, so there are no pixel thresholds here any
-more than anywhere else in this app.
-
-Server-side additions over the browser build:
-  * YOLO11x instead of the browser's EfficientDet-Lite0-uint8 (4.5MB)
-  * a crop-and-upscale rescue pass around the player's feet, which makes a
-    small ball far larger relative to the detector's fixed input
-
-The per-frame detector is the ONLY part that changed when YOLO11x replaced
-EfficientDet-Lite2. Everything below it — the plausibility gates, the Viterbi
-track selection, the gap interpolation — is detector-agnostic and unmodified,
-which is also why swapping back via SFAI_BALL_BACKEND=efficientdet is a
-one-line change rather than a different code path.
-"""
-
 from __future__ import annotations
 
 import math
@@ -38,69 +9,34 @@ import numpy as np
 import models_cache
 from biomechanics import LM, X, Y, V
 
-# COCO class 32. YOLO11x is a general COCO detector, not a ball specialist —
-# which is exactly why it holds up here: a model fine-tuned on distant sideline
-# footage scored 0.00 on the close-up framing this app asks users to film.
 BALL_CLASS_ID = 32
 BALL_CATEGORY = "sports ball"
 
-# Below this a detection is not worth offering to the tracker at all. Note the
-# interaction with MISS_COST: emission cost is (1 - score), so anything under
-# 0.2 already costs more than declaring "no ball here" and only survives if
-# neighbouring frames corroborate it. That is the intended behaviour — weak
-# detections need temporal support — so the floor sits below MISS_COST's
-# break-even rather than at it.
 SCORE_FLOOR = float(os.environ.get("SFAI_BALL_SCORE_FLOOR", "0.15"))
 
-# Inference resolution. 640 is what YOLO11 was trained at, and going higher
-# measurably hurt: at 1280 a clean 0.94 detection fell to 0.66 and both
-# ball-free test frames sprouted confident false positives (0.61, 0.16).
-# Upscaling past the trained resolution is not free accuracy.
 IMGSZ = int(os.environ.get("SFAI_BALL_IMGSZ", "640"))
 
-# ── Plausibility gates (all scale-free) ─────────────────────────────────────
-# A ball's bounding box is near-square from any angle. Long thin boxes are line
-# markings, shins or smeared grass. Loose, because a fast ball smears to an oval.
 MIN_ROUNDNESS = 0.5
-# A size-5 ball is ~22cm across and hip-to-shoulder is ~50cm, so a ball is ~0.45
-# torso lengths wide. The band is generous because the ball can sit nearer to or
-# further from the camera than the player.
 MIN_DIAM_TORSO = 0.18
 MAX_DIAM_TORSO = 0.95
 
-# ── Track-selection costs ───────────────────────────────────────────────────
-# Cost of declaring "no ball in this frame". Must sit above the emission cost of
-# a plausible detection (1 - score, so ~0.3 at score 0.7) or the track would
-# rather see nothing than accept a real ball.
 MISS_COST = 0.8
 STEP_WEIGHT = 0.6
-# A struck ball leaves at ~25m/s; at 30fps that is ~0.8m, or ~1.7 torso lengths,
-# in one frame. Displacement beyond this is capped rather than rejected, so a
-# genuinely fast ball is penalised but still reachable.
 MAX_STEP_TORSO = 2.5
 
 
 def _thread_budget() -> int:
-    """Cores this process may use for inference.
-
-    Each phase runs in its own worker process and torch would otherwise grab
-    every core in all three at once, so the workers spend their time fighting
-    each other for the same CPUs instead of running.
-    """
     workers = max(1, int(os.environ.get("SFAI_WORKERS", "3")))
     return max(1, (os.cpu_count() or 4) // workers)
 
 
 class _YoloBackend:
-    """YOLO11x via Ultralytics. Stateless per frame, and batched per clip."""
 
     def __init__(self, model_path: str | None = None):
         import torch
         from ultralytics import YOLO
         from ultralytics.utils import SETTINGS
 
-        # Ultralytics posts usage analytics by default. This server handles
-        # user-submitted video; nothing about it should phone home.
         try:
             SETTINGS.update({"sync": False})
         except Exception:
@@ -110,7 +46,6 @@ class _YoloBackend:
         self.model = YOLO(model_path or models_cache.ensure(models_cache.YOLO11X))
 
     def raw_boxes(self, images: list[np.ndarray]) -> list[list[dict]]:
-        """Boxes per image, in that image's own pixel coordinates."""
         results = self.model.predict(images, classes=[BALL_CLASS_ID],
                                      conf=SCORE_FLOOR, imgsz=IMGSZ, verbose=False)
         out = []
@@ -128,8 +63,6 @@ class _YoloBackend:
 
 
 class _EfficientDetBackend:
-    """The previous detector, kept reachable via SFAI_BALL_BACKEND=efficientdet
-    for deployments that cannot take on YOLO11x's AGPL-3.0 obligation."""
 
     def __init__(self, model_path: str | None = None):
         import mediapipe as mp
@@ -171,7 +104,6 @@ class _EfficientDetBackend:
 
 
 class BallSession:
-    """One detector. Not thread-safe — give each worker its own."""
 
     def __init__(self, model_path: str | None = None):
         backend = os.environ.get("SFAI_BALL_BACKEND", "yolo").strip().lower()
@@ -190,22 +122,12 @@ class BallSession:
         self.close()
 
     def detect_sequence(self, frames: list[dict], scales, all_pts=None) -> list:
-        """Find the ball across one ordered clip.
-
-        `frames`  [{"image": BGR ndarray, "time": seconds}] ascending in time
-        `scales`  torso length in px per frame (None where pose failed)
-        `all_pts` per-frame landmark arrays, used only to aim the rescue crop
-        Returns one entry per frame: {"x","y","r","score","interpolated"} or None.
-        """
         n = len(frames)
         filled = _fill_scales(scales, n)
 
-        # The whole clip goes through in one batch — a clip is a couple of dozen
-        # frames at most, and per-frame calls waste the batch dimension entirely.
         raw = self._backend.raw_boxes([f["image"] for f in frames])
         per_frame = [_candidates(raw[i], filled[i]) for i in range(n)]
 
-        # Only frames that found nothing pay for the second pass.
         for i in range(n):
             if not per_frame[i]:
                 pts = all_pts[i] if all_pts is not None else None
@@ -214,15 +136,6 @@ class BallSession:
         return _fill_gaps(_best_track(per_frame, filled))
 
     def _rescue(self, bgr, pts, scale):
-        """Second chance on a crop around the feet, upscaled.
-
-        The detector resizes whatever it is given to a fixed square input, so a
-        ball that is 40px wide in a 1080p frame arrives far smaller than that —
-        near the limit of what it can resolve. Cropping to the region the ball
-        can plausibly be in and upscaling that gives the same ball several times
-        the pixels, at the cost of one extra inference on frames that found
-        nothing anyway.
-        """
         if pts is None or scale <= 0:
             return []
         h, w = bgr.shape[:2]
@@ -232,8 +145,6 @@ class BallSession:
 
         cx = float(np.mean([p[X] for p in feet]))
         cy = float(np.mean([p[Y] for p in feet]))
-        # The ball sits within roughly a torso length of the feet at the moments
-        # this app scores; pad generously and let the gates do the filtering.
         pad = scale * 1.8
         x0, y0 = max(0, int(cx - pad)), max(0, int(cy - pad))
         x1, y1 = min(w, int(cx + pad)), min(h, int(cy + pad))
@@ -248,7 +159,6 @@ class BallSession:
             k = 1.0
 
         cands = _candidates(self._backend.raw_boxes([crop])[0], scale * k)
-        # Map back into full-frame coordinates.
         for c in cands:
             c["x"] = c["x"] / k + x0
             c["y"] = c["y"] / k + y0
@@ -258,9 +168,6 @@ class BallSession:
 
 
 def _fill_scales(scales, n):
-    """Torso length is the yardstick for every gate, but pose may have failed on
-    some frames. Borrow the median of the frames it did read — the player's size
-    does not meaningfully change within ~0.3s."""
     known = [s for s in (scales or []) if s is not None and math.isfinite(s) and s > 0]
     median = sorted(known)[len(known) // 2] if known else 0.0
     out = []
@@ -271,11 +178,6 @@ def _fill_scales(scales, n):
 
 
 def _candidates(boxes, scale):
-    """One frame's raw boxes, reduced to plausible ball candidates.
-
-    Takes the backend-neutral {"x","y","w","h","score"} shape, so these gates
-    read identically whichever detector produced the boxes.
-    """
     out = []
     for b in boxes or []:
         w, h = b["w"], b["h"]
@@ -285,8 +187,6 @@ def _candidates(boxes, scale):
             continue
 
         diam = (w + h) / 2
-        # Only size-gate when we know how big the player is; with no pose on any
-        # frame of the clip we would be inventing a reference.
         if scale and scale > 0:
             rel = diam / scale
             if rel < MIN_DIAM_TORSO or rel > MAX_DIAM_TORSO:
@@ -298,15 +198,6 @@ def _candidates(boxes, scale):
 
 
 def _best_track(per_frame, scales):
-    """Pick the most coherent path through the per-frame candidates (Viterbi).
-
-    Each frame's states are its candidates plus a "not visible here" state, so
-    the track survives the ball being missed mid-clip without being forced onto
-    whatever junk the detector did return. State cost is unconfidence
-    (1 - score); moving between two real candidates costs how far the ball would
-    have had to travel, in torso lengths. A lone false positive far from
-    everything else therefore loses to the miss state.
-    """
     n = len(per_frame)
     if n == 0:
         return []
@@ -319,8 +210,6 @@ def _best_track(per_frame, scales):
         return MISS_COST if k == MISS else 1 - per_frame[i][k]["score"]
 
     def transition(i, frm, to):
-        # Nothing to compare across a gap — moving in or out of the miss state
-        # is free, and charging for it twice would just bias against gaps.
         if frm == MISS or to == MISS:
             return 0.0
         a, b = per_frame[i - 1][frm], per_frame[i][to]
@@ -352,10 +241,6 @@ def _best_track(per_frame, scales):
 
 
 def _fill_gaps(track):
-    """Fill frames missed *between* two good ones. Over the ~0.3s of a clip the
-    ball's path is close enough to straight for this to beat having no reading.
-    We deliberately do not extrapolate past the ends of the track — that would
-    be a guess, not an interpolation — and everything filled is flagged."""
     known = [i for i, b in enumerate(track) if b]
     if not known:
         return [None] * len(track)
