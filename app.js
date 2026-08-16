@@ -1,16 +1,13 @@
 /* app.js — UI wiring for Soccer Form AI.
  *
- * The browser's job: capture or load a video, show a live skeleton/ball overlay
- * while filming, let the user scrub and pick three moments, then hand the whole
- * thing to the analysis server and render what comes back. It does not measure
- * or score anything — that all lives in server/ so there is one copy of it.
+ * The browser's job: capture or load a video, let the user scrub and pick three
+ * moments, then hand the whole thing to the analysis server and render what
+ * comes back. It does not measure or score anything — that all lives in server/
+ * so there is one copy of it, and it runs no model of its own: nothing is
+ * inferred on the user's device.
  */
 
 import { Recorder, loadVideo, seekTo, captureFrame } from './js/video.js';
-import { initPose, detectPoseLive, resetLiveClock, getBackend } from './js/mediapipe.js';
-import { initBall, detectBallLive, resetBallLive, getBallBackend } from './js/ballDetection.js';
-import { toPixels, torsoScale, viewQuality } from './js/biomechanics.js';
-import { drawOverlay } from './js/overlay.js';
 import * as api from './js/api.js';
 
 const $ = s => document.querySelector(s);
@@ -31,26 +28,6 @@ let clipBounds = {
   followThrough: { start: null, end: null }
 };
 let serverInfo = null;
-
-/* ── Live-preview engines (browser-side only) ───────────────────────────── */
-
-const engine = { pose: 'loading…', ball: 'loading…' };
-const renderEngineStatus = () =>
-  { $('#engineStatus').textContent = `Live preview — pose: ${engine.pose} · ball: ${engine.ball}`; };
-renderEngineStatus();
-
-initPose()
-  .then(() => { engine.pose = `ready (${getBackend()})`; })
-  .catch(err => { console.error(err); engine.pose = 'unavailable'; })
-  .finally(renderEngineStatus);
-
-// Both live engines are strictly optional: they drive the recording overlay
-// only. If either fails to load the app still records and still analyzes,
-// because the real work happens on the server.
-initBall()
-  .then(() => { engine.ball = `ready (${getBallBackend()})`; })
-  .catch(err => { console.warn('Live ball detector unavailable:', err); engine.ball = 'unavailable'; })
-  .finally(renderEngineStatus);
 
 /* ── Server connection ──────────────────────────────────────────────────── */
 // The server address is fixed (js/api.js) — nothing for the user to type or
@@ -88,12 +65,10 @@ $('#btnCam').addEventListener('click', async () => {
   try {
     await recorder.enableCamera($('#camPreview'));
     $('#camWrap').classList.toggle('mirrored', recorder.facingMode === 'user');
-    $('#camOverlay').hidden = false;
     $('#btnRec').disabled = false;
     $('#btnFlip').disabled = false;
     $('#btnCam').disabled = true;
-    msg('#inputMsg', 'Camera on. The preview and overlay stay in this tab — nothing is sent until you analyze.', false);
-    if (liveOverlayWanted()) startLiveLoop();
+    msg('#inputMsg', 'Camera on. The preview stays in this tab — nothing is sent until you analyze.', false);
   } catch (err) {
     msg('#inputMsg', `Camera unavailable: ${err.message}`);
   }
@@ -104,7 +79,6 @@ $('#btnFlip').addEventListener('click', async () => {
   try {
     const mode = await recorder.switchCamera($('#camPreview'));
     $('#camWrap').classList.toggle('mirrored', mode === 'user');
-    sizeCamOverlay(); // front/back sensors can report different resolutions
     msg('#inputMsg', `Switched to the ${mode === 'user' ? 'front' : 'back'} camera.`, false);
   } catch (err) {
     msg('#inputMsg', `Could not switch camera — reconnected to the previous one. (${err.message})`);
@@ -127,9 +101,7 @@ $('#btnRec').addEventListener('click', async () => {
   $('#btnStop').disabled = true;
   $('#recTimer').textContent = '';
   recorder.release();
-  stopLiveLoop();
   $('#camPreview').hidden = true;
-  $('#camOverlay').hidden = true;
   $('#camPreview').srcObject = null;
   $('#camWrap').classList.remove('mirrored');
   $('#btnCam').disabled = false;
@@ -139,166 +111,6 @@ $('#btnRec').addEventListener('click', async () => {
 
 $('#btnStop').addEventListener('click', () => recorder.stop());
 
-/* ── Live skeleton / angle / ball overlay ───────────────────────────────── */
-
-// Pose runs every tick; ball runs on a much slower cadence. Object detection
-// costs several times what pose does — measured around half a second per
-// frame on CPU, versus pose's GPU-driven ~33ms — and letting it share the
-// pose budget would drop the skeleton to a stutter, which is the part you
-// actually frame the shot with. That gap can't be closed by asking the model
-// for more frames; the fix is to not need more of them. Each tick, instead of
-// redrawing the last detection frozen in place (a hold-then-jump that looks
-// broken next to the buttery skeleton), we extrapolate along the ball's last
-// known velocity — the same dead-reckoning trick video game netcode uses to
-// hide a sparse, laggy signal. See getSmoothedBall below.
-const LIVE_INTERVAL_MS = 33;    // ~30 pose detections/sec ceiling
-const BALL_INTERVAL_MS = 200;   // ball detection ceiling; actual rate is
-                                 // slower and self-limited by ballBusy below
-const BALL_EXTRAPOLATE_MAX_MS = 350; // stop projecting motion past this long
-                                      // since the last real detection — a
-                                      // ball that's been unseen this long
-                                      // isn't still traveling in a straight
-                                      // line, and holding position (rather
-                                      // than flying off-screen) reads better
-
-let liveShowSkeleton = false;
-let liveShowAngles = false;
-let liveShowBall = false;
-let liveTimer = null;
-let liveBusy = false;
-let ballBusy = false;
-let lastBallAt = 0;
-let ballPrev = null;   // {x, y, r, t} — the detection before ballCurr
-let ballCurr = null;   // {x, y, r, t} — most recent real detection
-let lastViewLabel = null;
-
-const liveOverlayWanted = () => liveShowSkeleton || liveShowAngles || liveShowBall;
-
-function sizeCamOverlay() {
-  const camPreview = $('#camPreview'), overlay = $('#camOverlay');
-  if (camPreview.videoWidth && overlay.width !== camPreview.videoWidth) {
-    overlay.width = camPreview.videoWidth;
-    overlay.height = camPreview.videoHeight;
-  }
-}
-
-function startLiveLoop() {
-  if (liveTimer || !liveOverlayWanted()) return;
-  resetLiveClock();
-  resetBallLive();
-  liveBusy = ballBusy = false;
-  ballPrev = ballCurr = null;
-  lastBallAt = 0;
-
-  liveTimer = setInterval(async () => {
-    if (liveBusy) return; // previous detection still running — don't pile up
-    const camPreview = $('#camPreview');
-    if (camPreview.hidden || !camPreview.videoWidth) return;
-    liveBusy = true;
-    sizeCamOverlay();
-    try {
-      const frame = captureFrame(camPreview);
-      const overlay = $('#camOverlay');
-      const res = await detectPoseLive(frame);
-      const pts = res ? toPixels(res.landmarks, overlay.width, overlay.height) : null;
-      const scale = pts ? torsoScale(pts) : null;
-
-      if (pts) updateViewHint(pts);
-      if (liveShowBall) maybeDetectBall(frame, scale, overlay);
-      else ballPrev = ballCurr = null;
-
-      const ball = liveShowBall ? scaleBall(getSmoothedBall(performance.now()), frame, overlay) : null;
-      drawOverlay(overlay, pts, {
-        skeleton: liveShowSkeleton, angles: liveShowAngles,
-        ball
-      });
-    } catch (err) {
-      console.error(err);
-    } finally {
-      liveBusy = false;
-    }
-  }, LIVE_INTERVAL_MS);
-}
-
-/** Kick off a ball detection if one is due and none is in flight. Deliberately
- *  not awaited: the pose tick must not wait on it. */
-function maybeDetectBall(frame, scale, overlay) {
-  const now = performance.now();
-  if (ballBusy || now - lastBallAt < BALL_INTERVAL_MS) return;
-  ballBusy = true;
-  lastBallAt = now;
-  detectBallLive(frame, scale ? scale * (frame.width / overlay.width) : null)
-    .then(b => {
-      const t = performance.now();
-      if (b) { ballPrev = ballCurr; ballCurr = { ...b, t }; }
-      // A real miss (ball genuinely gone, per detectBallLive's own forget
-      // logic) — stop extrapolating rather than fly a phantom ring onward.
-      else { ballPrev = ballCurr = null; }
-    })
-    .catch(err => { console.warn('live ball:', err); ballPrev = ballCurr = null; })
-    .finally(() => { ballBusy = false; });
-}
-
-/** What to draw *this* render tick, given detections that only land every
- *  BALL_INTERVAL_MS-or-slower. With two real samples we know a velocity;
- *  project the ball forward along it for the (up to ~30) ticks between them,
- *  so the ring glides instead of teleporting. One sample, or a stale pair, and
- *  there's nothing honest to extrapolate — just hold position. */
-function getSmoothedBall(now) {
-  if (!ballCurr) return null;
-  if (!ballPrev) return ballCurr;
-  const dt = ballCurr.t - ballPrev.t;
-  const elapsed = now - ballCurr.t;
-  if (dt <= 0 || elapsed < 0 || elapsed > BALL_EXTRAPOLATE_MAX_MS) return ballCurr;
-  const vx = (ballCurr.x - ballPrev.x) / dt;
-  const vy = (ballCurr.y - ballPrev.y) / dt;
-  return { x: ballCurr.x + vx * elapsed, y: ballCurr.y + vy * elapsed, r: ballCurr.r };
-}
-
-/** The ball comes back in the captured frame's pixel space; the overlay canvas
- *  may be a different size. */
-function scaleBall(ball, frame, overlay) {
-  if (!ball) return null;
-  const k = overlay.width / frame.width;
-  return { x: ball.x * k, y: ball.y * k, r: ball.r * k };
-}
-
-// Tell the player the camera angle is wrong while they can still move it,
-// rather than letting the server report unscoreable metrics afterwards.
-function updateViewHint(pts) {
-  const v = viewQuality(pts);
-  if (v.label === lastViewLabel) return;
-  lastViewLabel = v.label;
-  const el = $('#viewHint');
-  if (v.label === 'side-on') {
-    el.textContent = '📐 Camera angle looks side-on — good.';
-    el.className = 'ok';
-  } else if (v.label === 'angled') {
-    el.textContent = '📐 Partly side-on. Rotate the camera square to the line of the shot for full accuracy.';
-    el.className = 'muted';
-  } else {
-    el.textContent = '📐 This looks face-on. Fore/aft measurements cannot be read from here — move the camera to the side.';
-    el.className = 'msg';
-  }
-}
-
-function stopLiveLoop() {
-  clearInterval(liveTimer);
-  liveTimer = null;
-  ballPrev = ballCurr = null;
-  lastViewLabel = null;
-  $('#viewHint').textContent = '';
-  const overlay = $('#camOverlay');
-  overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
-}
-
-const bindLiveToggle = (sel, set) => $(sel).addEventListener('change', e => {
-  set(e.target.checked);
-  liveOverlayWanted() ? startLiveLoop() : stopLiveLoop();
-});
-bindLiveToggle('#chkLiveSkeleton', v => { liveShowSkeleton = v; });
-bindLiveToggle('#chkLiveAngles', v => { liveShowAngles = v; });
-bindLiveToggle('#chkLiveBall', v => { liveShowBall = v; });
 
 /* ── Loading a video ────────────────────────────────────────────────────── */
 
@@ -733,6 +545,5 @@ function msg(sel, text, isError = true) {
 
 window.addEventListener('pagehide', () => {
   recorder.release();
-  stopLiveLoop();
   if (video.dataset.objurl) URL.revokeObjectURL(video.dataset.objurl);
 });

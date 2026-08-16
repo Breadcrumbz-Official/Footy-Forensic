@@ -3,9 +3,9 @@
 Record or upload a video of a soccer kick, pick three key moments, and get
 biomechanical analysis and coaching feedback.
 
-> **Where your video goes.** The live camera preview — skeleton, joint angles,
-> ball ring — is computed in your browser and never leaves it. The **video file
-> itself is uploaded** to the analysis server you connect to when you press
+> **Where your video goes.** The browser runs no model of its own — nothing is
+> inferred on your device. The camera preview stays local until you act, and the
+> **video file itself is uploaded** to the analysis server when you press
 > *Analyze technique*. The server writes it to a temp file, reads the frames it
 > needs, and deletes it in a `finally` block before responding; nothing is
 > retained. This is a change from earlier versions of this app, which did
@@ -16,7 +16,6 @@ biomechanical analysis and coaching feedback.
 ```
 BROWSER                                    SERVER (FastAPI)
 capture / upload video
-live skeleton + ball overlay
 scrub, pick 3 moments  ── video + times ─▶  decode at native resolution
                                             pose (heavy model) per clip
                                             ball tracking per clip
@@ -69,10 +68,6 @@ Camera capture requires `https://` or `localhost`.
 | `app.js` | UI wiring, capture, scrubbing, results rendering |
 | `js/api.js` | Server connection + upload |
 | `js/video.js` | Recording, loading, precise seeking, frame capture |
-| `js/mediapipe.js` | PoseLandmarker — live preview only |
-| `js/ballDetection.js` | ObjectDetector — live preview only |
-| `js/biomechanics.js` | Geometry the overlay needs |
-| `js/overlay.js` | Live skeleton / angle / ball drawing |
 | `server/main.py` | FastAPI: `/health`, `/analyze` |
 | `server/worker.py` | One process's work for one phase |
 | `server/video.py` | Decode + clip extraction |
@@ -109,8 +104,7 @@ collapse to ~0.25–0.45 × torso; face-on is ~0.70–0.95):
 | face-on | ≥ 0.78 | fore/aft metrics dropped as unscoreable, with a warning |
 
 Angles that live in the sagittal plane anyway — knee flex, ankle lock — are
-unaffected. The live preview runs the same check while you frame the shot, so
-you find out before recording rather than after.
+unaffected.
 
 ## Motion blur
 
@@ -130,9 +124,8 @@ yourself per phase.
 
 ## Ball tracking
 
-MediaPipe `ObjectDetector` filtered to the COCO `sports ball` class —
-EfficientDet-Lite2 on the server, Lite0-uint8 (4.5MB) in the browser for the
-live overlay.
+MediaPipe `ObjectDetector` filtered to the COCO `sports ball` class,
+EfficientDet-Lite2, on the server.
 
 A single frame's detection is not good enough to build a metric on. In testing
 the model put a confident `sports ball` box on a stretched patch of grass, and
@@ -229,28 +222,6 @@ mirrored, so kick-side detection is unaffected by which camera you used. Flip is
 disabled during recording, since the in-progress capture is bound to the current
 camera's tracks. If a device has only one camera, a failed flip reconnects to
 the one that was working.
-
-## Live preview overlay
-
-Three checkboxes above the camera preview — **Show skeleton**, **Show joint
-angles**, **Show ball** — turn on a local overlay while the camera is on and
-while recording. Off by default: this is the one place the app runs detection
-continuously rather than on three picked moments.
-
-Pose runs at up to ~30/sec (`LIVE_INTERVAL_MS`); ball runs on a much slower
-cadence (`BALL_INTERVAL_MS`, ~5/sec) with its last position redrawn in between,
-because object detection costs several times what pose does and sharing the
-budget would drop the skeleton to a stutter. Both have busy guards, so a slower
-device settles at whatever rate it can sustain instead of piling up work.
-
-The live ball tracker cannot use the server's Viterbi track — that needs the
-whole clip, and live has no future frames — so it greedily prefers candidates
-near the last accepted position, the same "confidence minus travel cost" idea
-resolved one frame at a time. Nothing is scored from the live overlay.
-
-The angle labels read the same `angleDeg(a, vertex, c)` on the same three
-landmark coordinates the server scores with, so a live "142°" at the knee is
-exactly what would score that joint.
 
 ## What it can and cannot tell you
 

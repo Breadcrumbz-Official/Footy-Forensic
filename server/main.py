@@ -1,8 +1,8 @@
 """Soccer Form AI — analysis server.
 
-The browser captures the video, shows the live skeleton/ball overlay, and lets
-the user pick three moments. Everything after that happens here: decoding at
-native resolution, pose across each clip with the heavy model, ball tracking,
+The browser captures the video and lets the user pick three moments; it runs no
+model of its own. Everything after that happens here: decoding at native
+resolution, pose across each clip with the heavy model, ball tracking,
 biomechanics and scoring.
 
 Run:

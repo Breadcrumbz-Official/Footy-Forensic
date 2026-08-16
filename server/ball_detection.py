@@ -1,4 +1,4 @@
-"""Finds the ball in a clip — the server-side counterpart of js/ballDetection.js.
+"""Finds the ball in a clip — the only ball detection in the app.
 
 One frame's raw detection is not trustworthy for this. The COCO "sports ball"
 class also fires on round-ish background clutter (in testing, on a stretched
