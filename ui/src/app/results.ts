@@ -44,6 +44,9 @@ export interface DisplayPhase {
   time: number | null;
   shiftedMs: number;
   ballFound: boolean;
+  /** Gemini's short freeform paragraph for this phase, or null if AI
+   *  feedback isn't configured server-side or that call didn't come back. */
+  aiNote: string | null;
 }
 
 /** Coaching text for one phase, kept separate from the next phase's rather
@@ -171,6 +174,7 @@ export function toDisplay(result: AnalysisResult): DisplayResults {
       time: frame?.time ?? null,
       shiftedMs: frame?.shiftedMs ?? 0,
       ballFound: Boolean(frame?.ball),
+      aiNote: result.aiFeedback?.[key] ?? null,
     };
   });
 

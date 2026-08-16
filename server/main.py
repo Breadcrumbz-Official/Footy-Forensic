@@ -16,6 +16,11 @@ PRIVACY: unlike the original browser-only build, video uploaded here leaves the
 user's device. Uploads are written to a temp file, used, and deleted in a
 finally block — nothing is retained after the response is sent — but the client
 UI must say plainly that the video is being sent to a server, and it does.
+
+If GEMINI_API_KEY is set (see gemini_feedback.py), the three annotated phase
+frames are ALSO sent to Google's Gemini API for freeform coaching text. This
+is a second, separate destination for that image data and the client UI's
+privacy line reflects that when the /health check reports it enabled.
 """
 
 from __future__ import annotations
@@ -30,6 +35,25 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 
+
+def _load_dotenv(path: str = ".env") -> None:
+    """Dependency-free .env loader, so a machine run by hand (`python -m
+    uvicorn ...`) doesn't need GEMINI_API_KEY exported by the shell every
+    time. A real environment variable always wins — this only fills in what
+    is missing. Never commit the .env file itself (see .gitignore)."""
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+_load_dotenv()
+
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,6 +62,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 import analysis
 import biomechanics
+import gemini_feedback
 import models_cache
 import scoring
 import video
@@ -124,6 +149,7 @@ def health():
         "ballModel": os.path.basename(models_cache.DETECTOR_LITE2[0]),
         "maxUploadMb": MAX_UPLOAD_MB,
         "maxEdge": video.MAX_EDGE,
+        "aiFeedback": gemini_feedback.enabled(),
     }
 
 
@@ -256,20 +282,26 @@ async def _run(path: str, spec: AnalyseSpec) -> dict:
     warnings = _warnings(spec, ctx, frames, per_phase)
 
     out_frames = {}
+    jpeg_bytes = {}
     for p in PHASES:
         img = per_phase[p]["image"]
         drawn = analysis.draw_pose(img, frames[p]["pts"],
                                   analysis.highlight_for(p, ctx), frames[p]["ball"],
                                   angles=analysis.angle_labels(scored["phases"][p], ctx))
+        jb = video.encode_jpeg(drawn)
+        jpeg_bytes[p] = jb
         out_frames[p] = {
             "time": round(frames[p]["time"], 3),
             "shiftedMs": per_phase[p].get("shifted_ms", 0),
             "ball": _ball_out(frames[p]["ball"]),
             "ballFramesFound": per_phase[p].get("ball_found", 0),
             "clipFrames": per_phase[p].get("clip_len", 0),
-            "image": "data:image/jpeg;base64,"
-                     + base64.b64encode(video.encode_jpeg(drawn)).decode("ascii"),
+            "image": "data:image/jpeg;base64," + base64.b64encode(jb).decode("ascii"),
         }
+
+    ai_ms_t0 = time.perf_counter()
+    ai_feedback = await _ai_feedback(jpeg_bytes, scored, ctx)
+    ai_ms = round((time.perf_counter() - ai_ms_t0) * 1000)
 
     return {
         "overall": scored["overall"],
@@ -278,8 +310,30 @@ async def _run(path: str, spec: AnalyseSpec) -> dict:
         "frames": out_frames,
         "warnings": warnings,
         "video": info,
-        "timing": {"decodeMs": decode_ms, "detectMs": detect_ms},
+        "aiFeedback": ai_feedback,
+        "timing": {"decodeMs": decode_ms, "detectMs": detect_ms, "aiMs": ai_ms},
     }
+
+
+async def _ai_feedback(jpeg_bytes: dict[str, bytes], scored: dict, ctx) -> dict | None:
+    """One short Gemini paragraph per phase, run concurrently across the three
+    phases so the wait is roughly one call's latency, not three. Off unless
+    GEMINI_API_KEY is set; any failure here — network, quota, a malformed
+    response — must never cost the user the rule-based analysis they already
+    have, which is why every failure mode inside gemini_feedback.py resolves
+    to None rather than raising."""
+    if not gemini_feedback.enabled():
+        return None
+    try:
+        texts = await asyncio.gather(*[
+            gemini_feedback.phase_feedback(
+                PHASE_LABEL[p], jpeg_bytes[p], scored["phases"][p]["metrics"], ctx.kick_side)
+            for p in PHASES
+        ])
+    except Exception:
+        return None
+    out = dict(zip(PHASES, texts))
+    return out if any(out.values()) else None
 
 
 def _ball_out(ball):
