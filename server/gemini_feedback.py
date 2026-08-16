@@ -26,7 +26,13 @@ import os
 
 import httpx
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+# gemini-2.5-flash still appears in the models listing but returns 404 "no
+# longer available to new users" for keys issued recently, and phase_feedback
+# swallows that into None — the feature simply produced nothing, silently.
+# Pinned to an explicit version rather than an alias like gemini-flash-latest,
+# which floats to whatever is newest and took over 45s to answer when tried.
+# Override with SFAI_GEMINI_MODEL.
+DEFAULT_MODEL = "gemini-3.7-flash"
 
 
 def _api_key() -> str:
