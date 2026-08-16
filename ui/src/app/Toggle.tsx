@@ -1,10 +1,3 @@
-/* Toggle.tsx — the switch used for the live-overlay options.
- *
- * Colours come from the theme tokens rather than literals, so these track the
- * rest of the site if the palette changes. `--switch-background` is the token
- * the shadcn theme already reserves for exactly this control.
- */
-
 export function Toggle({
   checked,
   onChange,
@@ -18,7 +11,7 @@ export function Toggle({
   label: string;
   hint?: string;
   disabled?: boolean;
-  /** Overrides the "on" colour — used to tie a toggle to its phase colour. */
+  
   accent?: string;
 }) {
   const on = checked && !disabled;

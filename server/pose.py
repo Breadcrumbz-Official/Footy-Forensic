@@ -1,18 +1,3 @@
-"""PoseLandmarker wrapper — the server-side counterpart of js/mediapipe.js.
-
-Runs in VIDEO mode over short ordered clips rather than single stills. The
-moment with the most motion blur in a kick — the foot at contact — is exactly
-the one carrying the most weight in the score, and a single blurred frame can
-put landmarks in the wrong place while still reporting high visibility. VIDEO
-mode gives the model temporal context across the clip instead of asking it to
-judge one instant alone.
-
-Server-side additions over the browser build:
-  * the `heavy` model instead of `full`
-  * frames at the video's native resolution, not downscaled to 720p
-  * a rescue pass that retries a failed frame on an upscaled crop
-"""
-
 from __future__ import annotations
 
 import os
@@ -25,17 +10,10 @@ from mediapipe.tasks.python import vision
 
 import models_cache
 
-# detect_for_video needs strictly increasing timestamps for the life of an
-# instance. Phases are separate clips that are not chronological relative to
-# each other (a user may re-pick an earlier phase after a later one), so we run
-# our own virtual clock rather than using real video time. Deltas *within* a
-# clip still track real elapsed time, because the filter's smoothing depends on
-# realistic inter-frame spacing.
 _CLIP_GAP_MS = 200
 
 
 class PoseSession:
-    """One landmarker plus its clock. Not thread-safe — give each worker its own."""
 
     def __init__(self, model_path: str | None = None, heavy: bool = True):
         asset = models_cache.POSE_HEAVY if heavy else models_cache.POSE_FULL
@@ -70,12 +48,6 @@ class PoseSession:
         return self.landmarker.detect_for_video(image, ts_ms)
 
     def detect_sequence(self, frames: list[dict], rescue: bool = True) -> list:
-        """Run pose across one ordered clip.
-
-        `frames` is [{"image": ndarray BGR, "time": seconds}], ascending in time.
-        Returns one entry per frame: a landmark list, or None where no person
-        was found even after the rescue pass.
-        """
         out = []
         prev_t = None
         for f in frames:
@@ -93,14 +65,6 @@ class PoseSession:
         return out
 
     def _rescue(self, bgr: np.ndarray):
-        """Second chance for a frame the model missed.
-
-        A person small in frame is the common cause — the model downsamples its
-        input, and a distant player can fall below the size it can resolve.
-        Re-running at 2x on the same frame costs one extra inference and
-        recovers a useful share of them. Coordinates come back normalized, so
-        they need no rescaling to map onto the original frame.
-        """
         h, w = bgr.shape[:2]
         big = cv2.resize(bgr, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
         self.clock_ms += 1

@@ -1,30 +1,13 @@
-"""Thresholds, weights and coaching text — the single source of truth for scoring.
-
-Every rule below is data, not logic: change `ideal`, `tol` or `weight` to retune
-the model without touching any other file. Scores are a transparent function of
-the measurement; there are no free-floating numbers.
-
-This moved out of the browser when analysis moved to the server, so there is
-exactly one copy of it. The client no longer scores anything.
-"""
-
 from __future__ import annotations
 
-VIS_GATE = 0.4        # below this the landmark is too occluded to judge
-MIN_COVERAGE = 0.35   # below this share of a phase's weight, publish no score
+VIS_GATE = 0.4
+MIN_COVERAGE = 0.35
 
-# Metrics flagged `side_view` are measured along the image's horizontal axis —
-# fore/aft placement, reach, lean. A face-on camera projects that axis to almost
-# nothing, so those numbers collapse toward zero and would report a fine kick as
-# a bad one. Below HARD they are dropped outright; between HARD and SOFT they
-# are kept but marked.
 SIDE_VIEW_HARD = 0.35
 SIDE_VIEW_SOFT = 0.66
 
 
 def band(value: float, ideal, tol: float) -> int:
-    """Map a measurement to 0-100. Inside [lo, hi] -> 100. Beyond it the score
-    falls linearly, reaching 40 once `tol` outside the band, floored at 20."""
     lo, hi = ideal
     if lo <= value <= hi:
         return 100
@@ -63,16 +46,6 @@ FMT = {
 }
 
 
-## Ideal bands for the six joint-angle metrics below (marked "elite anchor")
-## are centred on a real reference strike rather than an invented number: a
-## Ronaldo instep drive run through this same pipeline —
-##   plant   backswingKneeFlex 93°   plantKneeBend 160°
-##   contact plantKneeBend 127°   kickLegExtension 140°   ankleLock 121°
-##   follow  kickLegExtension 162°
-## Notably the contact-phase plant knee (127°) sits far deeper than the old
-## "keep it firm" assumption — elite power strikes load the support leg hard,
-## they don't keep it stiff. Every other metric (fore/aft distances, balance,
-## hip rotation) has no reference clip yet and is untouched.
 RULES = {
     "plant": {
         "label": "Plant + Backswing",
@@ -99,7 +72,6 @@ RULES = {
             },
             {
                 "id": "plantKneeBend", "label": "Plant-leg loading", "weight": 1.0,
-                # elite anchor: 160°
                 "ideal": (150, 170), "tol": 22, "fmt": "deg",
                 "good": "Support knee softly flexed — stable landing.",
                 "low": {"what": "Support knee bent deep.",
@@ -109,7 +81,6 @@ RULES = {
             },
             {
                 "id": "backswingKneeFlex", "label": "Backswing knee cock", "weight": 1.1,
-                # elite anchor: 93°
                 "ideal": (70, 108), "tol": 35, "fmt": "deg",
                 "good": "Kicking knee well cocked, heel toward glutes.",
                 "low": {"what": "Knee folded very tight.",
@@ -161,7 +132,6 @@ RULES = {
             },
             {
                 "id": "kickLegExtension", "label": "Kicking-leg extension", "weight": 1.2,
-                # elite anchor: 140°
                 "ideal": (130, 155), "tol": 25, "fmt": "deg",
                 "good": "Leg extending strongly through the ball.",
                 "low": {"what": "Knee still noticeably bent at contact.",
@@ -190,7 +160,6 @@ RULES = {
             },
             {
                 "id": "plantKneeBend", "label": "Plant-leg stability", "weight": 0.9,
-                # elite anchor: 127° — deep loading, not a stiff post
                 "ideal": (115, 140), "tol": 24, "fmt": "deg",
                 "good": "Support knee loaded well — powering the strike.",
                 "low": {"what": "Support knee collapses too far.",
@@ -217,7 +186,6 @@ RULES = {
             },
             {
                 "id": "ankleLock", "label": "Ankle / foot lock", "weight": 0.7,
-                # elite anchor: 121°
                 "ideal": (112, 135), "tol": 28, "fmt": "deg",
                 "caveat": "Foot landmarks are the noisiest part of the model — indicative only.",
                 "good": "Ankle firm and pointed — solid strike surface.",
@@ -246,7 +214,6 @@ RULES = {
         "metrics": [
             {
                 "id": "kickLegExtension", "label": "Leg extension", "weight": 1.2,
-                # elite anchor: 162°
                 "ideal": (152, 175), "tol": 24, "fmt": "deg",
                 "good": "Full extension through the ball.",
                 "low": {"what": "Kicking leg stays bent after contact.",
@@ -313,17 +280,7 @@ RULES = {
 
 
 def _score_metric(rule: dict, meas, view_score: float) -> dict:
-    """Score one measurement against its rule.
-
-    A metric is "uncertain" — reported but never counted — when its landmarks
-    are occluded, when the geometry is degenerate, when the rule is a flagged
-    low-confidence proxy, or when it reads along the image's fore/aft axis and
-    the camera is not side-on enough for that axis to mean anything.
-    """
     fmt_v, fmt_r = FMT[rule["fmt"]]
-    # A degenerate frame yields NaN/inf here. The guard below already refuses to
-    # score those, but the raw value must not survive into the response either:
-    # NaN is not valid JSON and would fail the whole request at encode time.
     raw = None if meas is None else meas["value"]
     vis = 0.0 if meas is None else meas["vis"]
     out = {
@@ -383,21 +340,14 @@ def _weighted_mean(items):
 
 
 def score_all(metrics: dict, view_score: float = 1.0) -> dict:
-    """Score every phase and roll up to an overall figure."""
     phases = {}
     for key, rule in RULES.items():
         scored = [_score_metric(r, metrics[key].get(r["id"]), view_score) for r in rule["metrics"]]
         counted = [s for s in scored if not s.get("uncertain") and s.get("score") is not None]
 
-        # Coverage = share of this phase's intended weight we could actually
-        # measure. A phase judged on a third of its metrics should not speak as
-        # loudly as a fully measured one.
         total_w = sum(r["weight"] for r in rule["metrics"])
         coverage = (sum(i["weight"] for i in counted) / total_w) if total_w > 0 else 0.0
 
-        # Below MIN_COVERAGE we publish no number at all: "100/100" off a single
-        # measurable metric reads as a confident verdict and is worse than
-        # saying nothing.
         insufficient = coverage < MIN_COVERAGE
         phases[key] = {
             "key": key, "label": rule["label"], "weight": rule["weight"],

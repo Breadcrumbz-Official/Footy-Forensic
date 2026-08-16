@@ -1,17 +1,3 @@
-"""Pure geometry — the server-side counterpart of the browser's js/biomechanics.js.
-
-Points ("pts") are a numpy array of shape (33, 3): x, y, visibility, already
-converted from MediaPipe's normalized landmark space into ASPECT-CORRECTED
-pixel space (x * frame_w, y * frame_h).
-
-Why that conversion matters: MediaPipe normalizes x by frame width and y by
-frame height independently, so on a non-square frame the normalized space is
-anisotropically stretched and angles measured in it are simply wrong.
-
-Everything downstream is an angle or a distance divided by torso length, so
-results are independent of resolution, camera distance and player size.
-"""
-
 from __future__ import annotations
 
 import math
@@ -23,7 +9,6 @@ X, Y, V = 0, 1, 2
 
 
 class LM:
-    """MediaPipe Pose landmark indices (33-point model)."""
     NOSE = 0
     L_SH, R_SH = 11, 12
     L_EL, R_EL = 13, 14
@@ -35,8 +20,6 @@ class LM:
     L_FOOT, R_FOOT = 31, 32
 
 
-# Per-side index bundles so analysis is written once and applied to whichever
-# leg turns out to be the kicking / plant leg.
 SIDES = {
     "left":  {"sh": LM.L_SH, "el": LM.L_EL, "wr": LM.L_WR, "hip": LM.L_HIP,
               "kn": LM.L_KN, "an": LM.L_AN, "heel": LM.L_HEEL, "foot": LM.L_FOOT},
@@ -57,7 +40,6 @@ CONNECTIONS = [
 
 
 def to_pixels(landmarks, w: int, h: int) -> np.ndarray:
-    """Convert a MediaPipe NormalizedLandmark list to aspect-corrected pixels."""
     return np.array(
         [[lm.x * w, lm.y * h, getattr(lm, "visibility", 1.0)] for lm in landmarks],
         dtype=np.float64,
@@ -73,7 +55,6 @@ def mid(a, b) -> np.ndarray:
 
 
 def angle_deg(a, b, c) -> float:
-    """Interior angle at vertex `b`, in degrees, formed by a-b-c. 180 = straight."""
     v1 = (a[X] - b[X], a[Y] - b[Y])
     v2 = (c[X] - b[X], c[Y] - b[Y])
     n1, n2 = math.hypot(*v1), math.hypot(*v2)
@@ -92,58 +73,41 @@ def shoulder_center(p: np.ndarray) -> np.ndarray:
 
 
 def torso_scale(p: np.ndarray) -> float:
-    """Torso length (hip centre -> shoulder centre) in px: the unit for every
-    normalized distance. Falls back to hip width * 2.2 if badly foreshortened."""
     t = dist(hip_center(p), shoulder_center(p))
     hip_w = dist(p[LM.L_HIP], p[LM.R_HIP])
     return max(t, hip_w * 2.2, 1e-3)
 
 
 def torso_lean_deg(p: np.ndarray, direction: int) -> float:
-    """Signed torso lean from vertical. Positive = chest leaning FORWARD along
-    the kick direction. `direction` is +1 if the player kicks toward increasing x."""
     h, s = hip_center(p), shoulder_center(p)
     forward = (s[X] - h[X]) * direction
-    up = h[Y] - s[Y]              # image y grows downward, so this is + when upright
+    up = h[Y] - s[Y]
     return math.degrees(math.atan2(forward, up))
 
 
 def forward_offset(pt, ref, direction: int, scale: float) -> float:
-    """Signed horizontal offset of `pt` from `ref` along the kick direction, in torso units."""
     return ((pt[X] - ref[X]) * direction) / scale
 
 
 def height_above(pt, ref, scale: float) -> float:
-    """Height of `pt` above `ref` (positive = higher in the world), in torso units."""
     return (ref[Y] - pt[Y]) / scale
 
 
 def min_vis(p: np.ndarray, idxs) -> float:
-    """Minimum visibility across the given landmarks — the confidence gate."""
     return float(min(p[i][V] for i in idxs)) if len(idxs) else 0.0
 
 
-# ── View quality ────────────────────────────────────────────────────────────
-
-# Seen side-on, the shoulders and hips are edge-on to the camera, so their
-# apparent span collapses to a fraction of torso length. Seen face-on they are
-# at full width. Measured across a range of stills: side-on lands near
-# 0.25-0.45, front-on near 0.70-0.95.
-SIDE_ON_SPAN = 0.42     # at or below this the view is treated as fully side-on
-FRONT_ON_SPAN = 0.78    # at or above this it is treated as fully face-on
+SIDE_ON_SPAN = 0.42
+FRONT_ON_SPAN = 0.78
 
 
 @dataclass
 class ViewQuality:
-    """How side-on the camera is. 1.0 = ideal side-on, 0.0 = face-on."""
     score: float
     shoulder_ratio: float
     label: str
 
     def as_dict(self) -> dict:
-        # shoulder_ratio is NaN when the torso was too degenerate to measure
-        # (see view_quality below). round() preserves NaN, and NaN is not valid
-        # JSON, so it becomes null here rather than killing the whole response.
         ratio = self.shoulder_ratio
         return {"score": round(self.score, 3),
                 "shoulderRatio": round(ratio, 3) if math.isfinite(ratio) else None,
@@ -151,13 +115,6 @@ class ViewQuality:
 
 
 def view_quality(p: np.ndarray) -> ViewQuality:
-    """Judge how close to side-on this frame is.
-
-    This app's geometry is built for a side-on camera: torso lean, fore/aft
-    plant placement and backswing reach are all measured in the image plane, so
-    a face-on camera projects them to near zero and quietly reports a good kick
-    as a bad one. Detecting that is more useful than silently scoring it.
-    """
     scale = torso_scale(p)
     span = dist(p[LM.L_SH], p[LM.R_SH]) / scale if scale > 0 else float("nan")
     if not math.isfinite(span):
@@ -173,8 +130,6 @@ def view_quality(p: np.ndarray) -> ViewQuality:
     label = "side-on" if score >= 0.66 else ("angled" if score >= 0.33 else "face-on")
     return ViewQuality(score, span, label)
 
-
-# ── Context ─────────────────────────────────────────────────────────────────
 
 @dataclass
 class Context:
@@ -201,22 +156,6 @@ class Context:
 
 
 def derive_context(frames: dict, footedness: str = "auto") -> Context:
-    """Decide which leg kicks and which way the player faces.
-
-    Kicking leg, best source first:
-      1. `footedness` if the user stated it. A right-footed player shoots with
-         the right leg, and them telling us beats any amount of inference —
-         this is the single most common way a 2D read goes wrong, because from
-         a side-on camera the near and far leg overlap constantly.
-      2. Otherwise: across the contact and follow-through frames, the kicking
-         ankle is the one lifted highest relative to the hips.
-
-    Direction, best source first:
-      1. Where the BALL went between plant and follow-through. It is the thing
-         being aimed, rather than a proxy for it.
-      2. The kicking ankle's travel over the same interval.
-      3. Which way the plant foot's toes point — last resort for a head-on view.
-    """
     plant, contact, follow = frames["plant"], frames["contact"], frames["followThrough"]
 
     def lift(p, side):
@@ -228,8 +167,6 @@ def derive_context(frames: dict, footedness: str = "auto") -> Context:
 
     if footedness in ("left", "right"):
         kick_side, leg_source = footedness, "stated"
-        # Still report how strongly the frames agree, so a mismatch is visible
-        # rather than silently overridden.
         leg_confidence = min(1.0, abs(left_score - right_score) / 0.5)
     else:
         kick_side = "left" if left_score > right_score else "right"
@@ -255,8 +192,6 @@ def derive_context(frames: dict, footedness: str = "auto") -> Context:
         direction = int(math.copysign(1, toe)) if toe else 1
         dir_source = "toe"
 
-    # View quality is judged at contact: the frame carrying the most weight in
-    # the score, and the one the camera is usually squarest to.
     return Context(
         kick_side=kick_side,
         plant_side=plant_side,
@@ -271,8 +206,6 @@ def derive_context(frames: dict, footedness: str = "auto") -> Context:
 
 
 def inferred_kick_side(frames: dict) -> str:
-    """What the geometry alone would have picked, ignoring any stated footedness.
-    Used to tell the user when their stated foot disagrees with the video."""
     def lift(p, side):
         s = SIDES[side]
         return height_above(p[s["an"]], hip_center(p), torso_scale(p))

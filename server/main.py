@@ -1,28 +1,3 @@
-"""Foot Form — analysis server.
-
-The browser captures the video, shows the live skeleton/ball overlay, and lets
-the user pick three moments. Everything after that happens here: decoding at
-native resolution, pose across each clip with the heavy model, ball tracking,
-biomechanics and scoring.
-
-Run:
-    python -m uvicorn main:app --host 0.0.0.0 --port 8000
-    (from inside the server/ directory)
-
-Then expose it:
-    ngrok http 8000
-
-PRIVACY: unlike the original browser-only build, video uploaded here leaves the
-user's device. Uploads are written to a temp file, used, and deleted in a
-finally block — nothing is retained after the response is sent — but the client
-UI must say plainly that the video is being sent to a server, and it does.
-
-If GEMINI_API_KEY is set (see gemini_feedback.py), the three annotated phase
-frames are ALSO sent to Google's Gemini API for freeform coaching text. This
-is a second, separate destination for that image data and the client UI's
-privacy line reflects that when the /health check reports it enabled.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -37,10 +12,6 @@ from contextlib import asynccontextmanager
 
 
 def _load_dotenv(path: str = ".env") -> None:
-    """Dependency-free .env loader, so a machine run by hand (`python -m
-    uvicorn ...`) doesn't need GEMINI_API_KEY exported by the shell every
-    time. A real environment variable always wins — this only fills in what
-    is missing. Never commit the .env file itself (see .gitignore)."""
     if not os.path.isfile(path):
         return
     with open(path, encoding="utf-8") as f:
@@ -72,18 +43,10 @@ PHASES = ("plant", "contact", "followThrough")
 PHASE_LABEL = {"plant": "Plant + Backswing", "contact": "Contact",
                "followThrough": "Follow-through"}
 
-# Automatic clip span when the user did not set bounds by hand: ~8 frames at
-# 30fps either side of the picked instant.
 AUTO_SPAN_S = 0.26
-# At a real contact frame a foot is touching the ball, so the gap is about the
-# ball's own radius (~0.2 torso). Well past that and the picked frame is not the
-# strike, which matters because every contact metric assumes it is.
 CONTACT_NEAR_TORSO = 0.55
 MAX_UPLOAD_MB = int(os.environ.get("SFAI_MAX_UPLOAD_MB", "200"))
 
-# One worker per phase. Each holds its own MediaPipe graphs, which are neither
-# picklable nor thread-safe, so this is processes rather than threads. Three
-# leaves plenty of the 12 cores for the TFLite/XNNPACK thread pools inside each.
 WORKERS = int(os.environ.get("SFAI_WORKERS", "3"))
 
 _pool: ProcessPoolExecutor | None = None
@@ -92,7 +55,7 @@ _pool: ProcessPoolExecutor | None = None
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _pool
-    models_cache.prefetch_all()   # never make the first request pay for the download
+    models_cache.prefetch_all()
     _pool = ProcessPoolExecutor(max_workers=WORKERS)
     try:
         yield
@@ -102,9 +65,6 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Foot Form", version="2.0", lifespan=lifespan)
 
-# The browser page is served from somewhere else entirely (a local static
-# server, GitHub Pages, wherever) and reaches this through an ngrok URL, so the
-# origin never matches. Tighten SFAI_ALLOW_ORIGINS in any real deployment.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.environ.get("SFAI_ALLOW_ORIGINS", "*").split(","),
@@ -127,9 +87,6 @@ class AnalyseSpec(BaseModel):
     phases: dict[str, PhasePick]
     fps: float = 30.0
     footedness: str = Field(default="auto", pattern="^(auto|left|right)$")
-    # The duration the BROWSER measured for this video. The picked times are
-    # points on that timeline, and it is not always the timeline the container's
-    # own metadata implies — see video.extract_clips.
     duration: float | None = None
 
     def window(self, name: str) -> tuple[float, float]:
@@ -179,8 +136,6 @@ async def analyze(video_file: UploadFile = File(..., alias="video"),
             f.write(data)
         result = await _run(path, parsed)
     finally:
-        # The upload exists on disk only for as long as it takes to read the
-        # frames out of it.
         try:
             os.unlink(path)
         except OSError:
@@ -191,16 +146,6 @@ async def analyze(video_file: UploadFile = File(..., alias="video"),
 
 
 def _json_safe(obj):
-    """Make a response payload survive JSON encoding.
-
-    NaN and Infinity are not valid JSON and json.dumps refuses them outright, so
-    one unmeasurable number anywhere in a response turns a complete analysis
-    into a 500 with nothing in it — the user waited for the upload and the heavy
-    model and gets a stack trace. The known sources are fixed where they arise
-    (scoring._score_metric, biomechanics.ViewQuality.as_dict, video.probe);
-    this is the net under them, and it also flattens numpy scalars, which the
-    encoder cannot serialise either.
-    """
     if isinstance(obj, np.generic):
         return _json_safe(obj.item())
     if isinstance(obj, float):
@@ -212,16 +157,6 @@ def _json_safe(obj):
     return obj
 
 
-# ── The browser client ──────────────────────────────────────────────────────
-# Serving the page from here too means one ngrok tunnel covers both it and the
-# API, and the page then talks to its own origin — no pasting a URL that changes
-# every time the tunnel restarts.
-#
-# This points at ui/dist, the Vite build output, and nothing else: everything
-# under it is generated for the browser, so mounting the whole directory
-# publishes no source. Pointing it at the repo root would expose server/ and the
-# 54MB models/ over a public URL. Build it with `npm install && npm run build`
-# in ui/. The mount is declared after /health and /analyze, so those still win.
 _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 CLIENT_DIR = os.environ.get("SFAI_CLIENT_DIR", os.path.join(_REPO_ROOT, "ui", "dist"))
 
@@ -252,7 +187,6 @@ async def _run(path: str, spec: AnalyseSpec) -> dict:
             f"No frames found for: {', '.join(PHASE_LABEL[p] for p in empty)}. "
             "The picked times may be past the end of the video.")
 
-    # Pose + ball for the three phases run in parallel, one process each.
     t1 = time.perf_counter()
     loop = asyncio.get_running_loop()
     jobs = [loop.run_in_executor(_pool, analyse_phase, clips[p], spec.phases[p].time)
@@ -276,9 +210,6 @@ async def _run(path: str, spec: AnalyseSpec) -> dict:
                   "ball": per_phase[p].get("ball"),
                   "time": per_phase[p]["time"]} for p in PHASES}
 
-    # Check the skeletons before anything is measured off them, so a frame that
-    # gets re-posed is scored on the corrected landmarks rather than corrected
-    # only in the picture.
     t2 = time.perf_counter()
     reposed = await _verify_and_repose(per_phase, frames)
     verify_ms = round((time.perf_counter() - t2) * 1000)
@@ -303,9 +234,6 @@ async def _run(path: str, spec: AnalyseSpec) -> dict:
             "ball": _ball_out(frames[p]["ball"]),
             "ballFramesFound": per_phase[p].get("ball_found", 0),
             "clipFrames": per_phase[p].get("clip_len", 0),
-            # Which model actually produced the landmarks this phase was scored
-            # from. Shown in the client, because a re-posed frame is measured
-            # from a different keypoint set and the viewer should know.
             "reposed": bool(reposed.get(p)),
             "image": "data:image/jpeg;base64," + base64.b64encode(jb).decode("ascii"),
         }
@@ -328,21 +256,6 @@ async def _run(path: str, spec: AnalyseSpec) -> dict:
 
 
 async def _verify_and_repose(per_phase: dict, frames: dict) -> dict[str, bool]:
-    """Check each phase's skeleton against its own frame; re-pose the failures.
-
-    MediaPipe's confidence numbers cannot catch its worst failure — locking onto
-    a bystander, a shadow or a half-body ghost — because a skeleton on the wrong
-    subject is still a confident, well-formed skeleton. Looking at the drawn
-    overlay does catch it, so the frame the user will see is exactly what gets
-    checked.
-
-    Conservative by construction. A frame is only re-posed on an explicit "not
-    aligned", and the replacement is only accepted if the fallback model
-    actually returns a usable skeleton — every other outcome (no API key, a
-    timeout, an unparseable answer, no person found) leaves MediaPipe's result
-    exactly as it was. The fallback carries fewer keypoints than MediaPipe, so
-    swapping on a maybe would trade a good skeleton for a poorer one.
-    """
     out = {p: False for p in PHASES}
     if not gemini_feedback.enabled():
         return out
@@ -378,17 +291,9 @@ async def _verify_and_repose(per_phase: dict, frames: dict) -> dict[str, bool]:
 
 
 async def _ai_feedback(jpeg_bytes: dict[str, bytes], scored: dict, ctx) -> dict | None:
-    """One short Gemini paragraph per phase, run concurrently across the three
-    phases so the wait is roughly one call's latency, not three. Off unless
-    GEMINI_API_KEY is set; any failure here — network, quota, a malformed
-    response — must never cost the user the rule-based analysis they already
-    have, which is why every failure mode inside gemini_feedback.py resolves
-    to None rather than raising."""
     if not gemini_feedback.enabled():
         return None
     try:
-        # One shared connection pool across the three, which is worth an order
-        # of magnitude here — see gemini_feedback.batch().
         texts = await gemini_feedback.batch([
             (PHASE_LABEL[p], jpeg_bytes[p], scored["phases"][p]["metrics"], ctx.kick_side)
             for p in PHASES
@@ -448,10 +353,6 @@ def _warnings(spec: AnalyseSpec, ctx, frames, per_phase, reposed=None) -> list[s
                 f"Nearest foot is {d:.2f} torso lengths from the ball at contact — "
                 "may not be the actual strike frame. Worth re-picking.")
 
-    # "Plant foot vs ball" is scored at both plant and contact; either one
-    # missing the ball just drops that one metric, not the phase — the rest of
-    # the score comes from pose alone. Named here so that is visible rather
-    # than left to be inferred from a quietly absent metric.
     no_ball = [p for p in ("plant", "contact") if not frames[p]["ball"]]
     if len(no_ball) == 2:
         out.append("No ball tracked at plant or contact — those two ball-relative "

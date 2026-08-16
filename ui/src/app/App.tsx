@@ -18,10 +18,7 @@ import type { ReelMarker } from "./ReelScrubber";
 
 type Step = "upload" | "select" | "analyzing" | "results";
 
-/** Default capture window the reel slides over the video. The server cuts the
- *  clip to exactly this span and analyses its midpoint. Adjustable per phase —
- *  a longer window gives the pose model more frames to find a clean one in, at
- *  the cost of the pick being less specific. */
+
 const WINDOW_DEFAULT = 0.2;
 const WINDOW_MIN = 0.08;
 const WINDOW_MAX = 1.0;
@@ -86,9 +83,8 @@ export default function App() {
   const [expandedPhase, setExpandedPhase] = useState<PhaseKey | null>(null);
   const [thumbnails, setThumbnails] = useState<string[]>([]);
   const [thumbsLoading, setThumbsLoading] = useState(false);
-  // Per-phase capture window length, and which phases the user has actually
-  // touched — an untouched phase still shows its default guess, but is not
-  // drawn on the reel as though it were a deliberate pick.
+  
+  
   const [windows, setWindows] = useState<Record<PhaseKey, number>>({
     plant: WINDOW_DEFAULT, contact: WINDOW_DEFAULT, followThrough: WINDOW_DEFAULT,
   });
@@ -97,12 +93,11 @@ export default function App() {
   });
   const [reelWidth, setReelWidth] = useState(0);
 
-  // Server identity, so the upload screen can say whether analysis is actually
-  // available before the person records anything.
+  
   const [health, setHealth] = useState<api.Health | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
 
-  // Live recording
+  
   const [camOpen, setCamOpen] = useState(false);
   const [camReady, setCamReady] = useState(false);
   const [camError, setCamError] = useState<string | null>(null);
@@ -110,9 +105,7 @@ export default function App() {
   const [elapsed, setElapsed] = useState(0);
   const [facing, setFacing] = useState<"environment" | "user">("environment");
 
-  // Live overlay options. Each is independent: the detectors are only loaded
-  // when something that needs them is switched on.
-
+  
   const videoRef = useRef<HTMLVideoElement>(null);
   const thumbVideoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -121,9 +114,8 @@ export default function App() {
   const recorderRef = useRef<Recorder | null>(null);
   const seekRaf = useRef<number | null>(null);
   const pendingSeek = useRef<number | null>(null);
-  // Releasing the camera stops the MediaRecorder, which resolves the in-flight
-  // start() promise with whatever was captured. Without this flag, closing the
-  // panel mid-take would submit the partial clip as if the user had finished.
+  
+  
   const cancelledRef = useRef(false);
 
   useEffect(() => {
@@ -132,21 +124,12 @@ export default function App() {
       .catch(err => setHealthError(err.message));
   }, []);
 
-  /**
-   * Accept a video and move to the picking step.
-   *
-   * `fps` is only a fallback: server/video.py uses the container's own frame
-   * rate and reaches for this when the file does not report one — which is
-   * exactly the case for MediaRecorder WebM. Passing the camera's real capture
-   * rate keeps the server's frame timeline aligned with the times the reel
-   * scrubber produced.
-   */
+  
   const handleFile = useCallback((file: File, fps = 30) => {
     if (!file.type.startsWith("video/")) return;
     setSourceFps(fps);
-    // Uploading while the camera panel is open would leave the stream live
-    // behind an unmounted panel, and the browser's "recording" indicator with
-    // it. Done through the ref so this stays independent of hook ordering.
+    
+    
     cancelledRef.current = true;
     recorderRef.current?.release();
     recorderRef.current = null;
@@ -167,8 +150,7 @@ export default function App() {
     if (file) handleFile(file);
   }, [handleFile]);
 
-  /* ── Live recording ──────────────────────────────────────────────────── */
-
+  
   const releaseCamera = useCallback(() => {
     recorderRef.current?.release();
     recorderRef.current = null;
@@ -178,8 +160,7 @@ export default function App() {
     setElapsed(0);
   }, []);
 
-  // The camera keeps running (and the tab keeps showing "recording") until the
-  // tracks are stopped, so tear it down whenever this component goes away.
+  
   useEffect(() => () => {
     cancelledRef.current = true;
     releaseCamera();
@@ -192,8 +173,8 @@ export default function App() {
       setCamError("This browser cannot record video. Upload a file instead.");
       return;
     }
-    // getUserMedia is gated on a secure context. https and localhost qualify;
-    // a plain-http LAN address does not, and the failure is otherwise cryptic.
+    
+    
     if (!window.isSecureContext) {
       setCamError(
         "Recording needs a secure connection. Open this page over https (or on localhost) to use the camera.");
@@ -202,8 +183,8 @@ export default function App() {
     try {
       const rec = recorderRef.current ?? new Recorder();
       recorderRef.current = rec;
-      // The <video> mounts in the same render that opened the panel, so wait a
-      // frame for the ref to exist before handing it a stream.
+      
+      
       await new Promise(requestAnimationFrame);
       if (!camPreviewRef.current) return;
       await rec.enableCamera(camPreviewRef.current);
@@ -220,7 +201,7 @@ export default function App() {
   }, []);
 
   const closeCamera = useCallback(() => {
-    cancelledRef.current = true;   // discard anything captured so far
+    cancelledRef.current = true;   
     releaseCamera();
     setCamOpen(false);
     setCamError(null);
@@ -243,18 +224,18 @@ export default function App() {
     setIsRecording(true);
     setElapsed(0);
     cancelledRef.current = false;
-    // Read the capture rate off the live track before the stream is torn down.
+    
     const trackFps = rec.stream?.getVideoTracks()[0]?.getSettings().frameRate;
     const fps = Number.isFinite(trackFps) && (trackFps as number) > 0 ? (trackFps as number) : 30;
     try {
-      // Resolves when the user stops or the hard cap fires.
+      
       const blob = await rec.start(setElapsed);
       setIsRecording(false);
-      if (cancelledRef.current) return;   // panel was closed mid-take
+      if (cancelledRef.current) return;   
       releaseCamera();
       setCamOpen(false);
-      // The server keys off the filename extension when writing its temp file,
-      // so name it after the container MediaRecorder actually produced.
+      
+      
       const ext = blob.type.includes("mp4") ? "mp4" : "webm";
       handleFile(new File([blob], `kick.${ext}`, { type: blob.type || "video/webm" }), fps);
     } catch (err) {
@@ -277,8 +258,7 @@ export default function App() {
   const activeKey = SEGMENT_CONFIG[selectPage].key;
   const activeWindow = windows[activeKey];
 
-  // Every phase's window, so the reel can keep the ones already set visible
-  // while you work on the next one.
+  
   const reelMarkers: ReelMarker[] = SEGMENT_CONFIG.map(seg => ({
     key: seg.key,
     label: seg.shortLabel,
@@ -289,15 +269,7 @@ export default function App() {
     set: touched[seg.key],
   }));
 
-  /**
-   * Drive the reel from playback.
-   *
-   * `timeupdate` only fires about four times a second, which is far too coarse
-   * for the film to look like it is following the video. A rAF loop while
-   * playing keeps the marker locked to the playhead, and the filmstrip images
-   * are memoised so this costs a cheap re-render rather than relaying 90
-   * thumbnails per frame.
-   */
+  
   useEffect(() => {
     if (!isPlaying) return;
     let raf = 0;
@@ -305,8 +277,8 @@ export default function App() {
       const v = videoRef.current;
       if (v) {
         setCurrentTime(v.currentTime);
-        // Wherever you pause is your pick: playback and dragging move the same
-        // cursor, so the window under the marker is always what is selected.
+        
+        
         const t = Math.min(v.currentTime, Math.max(0, duration - activeWindow));
         setSegments(prev => (Math.abs(prev[activeKey] - t) < 1e-3 ? prev : { ...prev, [activeKey]: t }));
       }
@@ -320,8 +292,7 @@ export default function App() {
     if (videoRef.current && !isPlaying) setCurrentTime(videoRef.current.currentTime);
   };
 
-  // A clip straight out of MediaRecorder reports duration Infinity until it is
-  // coaxed out of the file, so every duration read goes through this.
+  
   const handleLoadedMetadata = async () => {
     if (!videoRef.current) return;
     const d = await ensureFiniteDuration(videoRef.current);
@@ -337,23 +308,14 @@ export default function App() {
   const handleThumbVideoLoaded = async () => {
     const el = thumbVideoRef.current;
     if (!el) return;
-    // Fall back to the visible player's duration: this element is kept out of
-    // sight, and a browser will not always coax a real duration out of a
-    // MediaRecorder file on one it is not showing.
+    
+    
     const own = await ensureFiniteDuration(el);
     const d = Number.isFinite(own) && own > 0 ? own : duration;
     extractThumbnails(d);
   };
 
-  /**
-   * Seek the preview to `t`, at most once per animation frame.
-   *
-   * Dragging the reel emits scroll events far faster than a <video> can decode,
-   * and assigning currentTime on every one queues seeks the element then works
-   * through one at a time — which is what made scrubbing feel laggy. Keeping
-   * only the newest target and issuing it when the element is idle means the
-   * picture tracks the finger instead of trailing several hundred ms behind.
-   */
+  
   const seekTo = useCallback((t: number) => {
     setCurrentTime(t);
     pendingSeek.current = t;
@@ -365,9 +327,8 @@ export default function App() {
       if (v.seeking) { seekRaf.current = requestAnimationFrame(pump); return; }
       pendingSeek.current = null;
       seekRaf.current = null;
-      // fastSeek jumps to the nearest keyframe without the exactness guarantee,
-      // which is what we want while dragging; the server re-cuts the clip from
-      // the original anyway, so the preview only has to look right.
+      
+      
       if (typeof v.fastSeek === "function") v.fastSeek(target);
       else v.currentTime = target;
     };
@@ -378,7 +339,7 @@ export default function App() {
     if (seekRaf.current !== null) cancelAnimationFrame(seekRaf.current);
   }, []);
 
-  // Seek a (hidden) video element and resolve once the frame is actually ready.
+  
   const seekAndWait = (video: HTMLVideoElement, t: number) =>
     new Promise<void>((resolve) => {
       const onSeeked = () => {
@@ -389,9 +350,7 @@ export default function App() {
       video.currentTime = t;
     });
 
-  // Build the horizontal filmstrip of real frames used by the reel scrubber,
-  // pulled from an offscreen video element so it never disturbs the visible
-  // preview above.
+  
   const extractThumbnails = useCallback(async (d: number) => {
     const video = thumbVideoRef.current;
     if (!video || !Number.isFinite(d) || d <= 0) return;
@@ -423,11 +382,7 @@ export default function App() {
     }
   }, [videoUrl]);
 
-  /**
-   * Send the video and the three windows to the server and show what comes
-   * back. The reel gives us the START of each capture window, so the clip is
-   * [t, t + WINDOW_SECONDS] and the instant analysed is its midpoint.
-   */
+  
   const startAnalysis = async () => {
     if (!videoFile) return;
     setStep("analyzing");
@@ -498,10 +453,10 @@ export default function App() {
       className="min-h-screen bg-background text-foreground"
       style={{ fontFamily: "'Inter', sans-serif" }}
     >
-      {/* ── STEP 1: Upload ── */}
+      
       {step === "upload" && (
         <div className="max-w-5xl mx-auto px-6">
-          {/* Hero */}
+          
           <div className="pt-20 pb-16 text-center">
             <h1
               className="text-foreground leading-none mb-6"
@@ -516,7 +471,7 @@ export default function App() {
             </p>
           </div>
 
-          {/* Server status — say plainly whether analysis is available. */}
+          
           <div className="mb-6 flex items-center justify-center">
             {health ? (
               <span
@@ -537,7 +492,7 @@ export default function App() {
             )}
           </div>
 
-          {/* Upload cards */}
+          
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
             <div
               className={`relative border-2 border-dashed rounded-xl p-10 flex flex-col items-center gap-5 cursor-pointer transition-all duration-200 ${
@@ -594,8 +549,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Camera panel — only mounted while open, so the stream is never
-              live behind a closed UI. */}
+          
           {camOpen && (
             <div className="bg-card border border-border rounded-xl p-5 mb-6">
               <div className="flex items-center justify-between mb-4">
@@ -707,9 +661,7 @@ export default function App() {
             </div>
           )}
 
-          {/* Footedness — the single most valuable thing the user can tell us.
-              From a side-on camera the near and far leg overlap constantly, and
-              guessing wrong mirrors every result. */}
+          
           <div className="bg-card border border-border rounded-xl p-5 mb-6">
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
@@ -737,7 +689,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Filming + privacy notice */}
+          
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-36">
             <div className="flex items-start gap-2.5 border border-border rounded-xl p-4">
               <Info className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
@@ -760,19 +712,16 @@ export default function App() {
         </div>
       )}
 
-      {/* ── STEP 2: Select clips (3-page reel scrubber) ── */}
+      
       {step === "select" && (
         <div className="max-w-3xl mx-auto px-6 py-8">
-          {/* Hidden video used purely to extract filmstrip thumbnails —
-              never displayed, so scrubbing the reel doesn't disturb it. */}
+          
           {videoUrl && (
             <video
               ref={thumbVideoRef}
               src={videoUrl}
-              // Kept off-screen rather than display:none. A hidden media element
-              // is deprioritised by the browser, and seeking one frame by frame
-              // to build the filmstrip then stalls or never fires `seeked` — so
-              // it stays rendered, just nowhere anyone can see it.
+              
+              
               style={{ position: "fixed", left: -9999, top: 0, width: 2, height: 2, opacity: 0, pointerEvents: "none" }}
               aria-hidden="true"
               muted
@@ -814,7 +763,7 @@ export default function App() {
             </div>
           )}
 
-          {/* Page indicator */}
+          
           <div className="flex items-center justify-center gap-2 mb-5">
             {SEGMENT_CONFIG.map((seg, i) => (
               <button
@@ -843,7 +792,7 @@ export default function App() {
             ))}
           </div>
 
-          {/* Video preview */}
+          
           <div className="bg-card border border-border rounded-xl overflow-hidden mb-5">
             <div className="relative aspect-video bg-black flex items-center justify-center">
               {videoUrl ? (
@@ -878,7 +827,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Active phase card + reel */}
+          
           {(() => {
             const seg = SEGMENT_CONFIG[selectPage];
             return (
@@ -923,8 +872,7 @@ export default function App() {
                   }}
                 />
 
-                {/* Window length. More frames gives the pose model more chances
-                    at a clean one; fewer makes the pick more specific. */}
+                
                 <div className="flex items-center gap-3 mt-4">
                   <span
                     className="text-[10px] font-black tracking-widest text-muted-foreground shrink-0"
@@ -942,7 +890,7 @@ export default function App() {
                     onChange={e => {
                       const w = Number(e.target.value);
                       setWindows(prev => ({ ...prev, [seg.key]: w }));
-                      // Keep the window inside the clip when it grows near the end.
+                      
                       setSegments(prev => ({
                         ...prev,
                         [seg.key]: Math.min(prev[seg.key], Math.max(0, duration - w)),
@@ -967,7 +915,7 @@ export default function App() {
             );
           })()}
 
-          {/* Phase info callout */}
+          
           <div className="flex items-start gap-2 px-1 mb-6">
             <Info className="w-3.5 h-3.5 text-muted-foreground mt-0.5 shrink-0" />
             <p className="text-xs text-muted-foreground leading-relaxed">
@@ -978,7 +926,7 @@ export default function App() {
             </p>
           </div>
 
-          {/* Page navigation */}
+          
           <div className="flex items-center justify-between gap-3">
             <button
               onClick={() => setSelectPage(p => Math.max(0, p - 1))}
@@ -992,8 +940,8 @@ export default function App() {
             {selectPage < SEGMENT_CONFIG.length - 1 ? (
               <button
                 onClick={() => {
-                  // Moving on counts as accepting this phase's window, so it
-                  // shows on the reel while the next one is picked.
+                  
+                  
                   setTouched(prev => ({ ...prev, [activeKey]: true }));
                   setSelectPage(p => Math.min(SEGMENT_CONFIG.length - 1, p + 1));
                 }}
@@ -1023,11 +971,11 @@ export default function App() {
         </div>
       )}
 
-      {/* ── STEP 3: Analyzing ── */}
+      
       {step === "analyzing" && (
         <div className="min-h-[85vh] flex flex-col items-center justify-center px-6">
           <div className="text-center max-w-sm w-full">
-            {/* Pulsing rings */}
+            
             <div className="relative w-24 h-24 mx-auto mb-10">
               <div className="absolute inset-0 rounded-full border border-primary/15 animate-ping" style={{ animationDuration: "2s" }} />
               <div className="absolute inset-3 rounded-full border border-primary/25 animate-ping" style={{ animationDuration: "2s", animationDelay: "0.4s" }} />
@@ -1049,9 +997,7 @@ export default function App() {
                 : "Decoding, detecting pose and tracking the ball on the server…"}
             </p>
 
-            {/* Upload progress is real and measurable. Server-side work reports
-                nothing until it finishes, so it gets an indeterminate bar rather
-                than an invented percentage. */}
+            
             <div className="w-full bg-muted rounded-full h-1.5 mb-2 overflow-hidden">
               {stage === "upload" ? (
                 <div
@@ -1069,7 +1015,7 @@ export default function App() {
               {stage === "upload" ? `${Math.round(uploadPct * 100)}%` : "working…"}
             </div>
 
-            {/* Stage list — two honest states, not a scripted countdown. */}
+            
             <div className="space-y-2.5 text-left">
               {[
                 { key: "upload", label: "Upload video to analysis server" },
@@ -1102,10 +1048,10 @@ export default function App() {
         </div>
       )}
 
-      {/* ── STEP 4: Results ── */}
+      
       {step === "results" && results && (
         <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
-          {/* Title bar */}
+          
           <div className="flex items-start justify-between">
             <div>
               <h2
@@ -1124,8 +1070,7 @@ export default function App() {
             </button>
           </div>
 
-          {/* Warnings straight from the server — these qualify everything below,
-              so they sit above the scores rather than under them. */}
+          
           {results.warnings.length > 0 && (
             <div className="border border-[#ffb800]/40 bg-[#ffb800]/8 rounded-xl p-5">
               <div className="flex items-center gap-2.5 mb-3">
@@ -1148,9 +1093,9 @@ export default function App() {
             </div>
           )}
 
-          {/* Score overview */}
+          
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {/* Overall */}
+            
             <div className="bg-card border border-border rounded-xl p-6 flex flex-col items-center justify-center gap-3">
               <div className="relative w-28 h-28">
                 <ScoreRing score={results.overall ?? 0} size={112} color={scoreColor(results.overall)} />
@@ -1174,7 +1119,7 @@ export default function App() {
               </span>
             </div>
 
-            {/* Phase scores */}
+            
             {results.phases.map((phase) => (
               <div
                 key={phase.key}
@@ -1252,11 +1197,7 @@ export default function App() {
             ))}
           </div>
 
-          {/* Annotated frames — the actual frames the server measured, with the
-              skeleton, tracked ball and scored joint angles drawn on. Those
-              angle labels come from the same scored metrics as the table above,
-              coloured by how each one scored, so the picture explains the rows.
-              This replaces the illustrative stick figures the design carried. */}
+          
           <div className="bg-card border border-border rounded-xl p-6">
             <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
               <h3
@@ -1341,8 +1282,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Feedback — one card per phase, not pooled, so a plant-phase note
-              and a follow-through note never blur into the same list. */}
+          
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             {results.feedback.map((f) => (
               <div key={f.key} className="bg-card border border-border rounded-xl p-5">
@@ -1386,7 +1326,7 @@ export default function App() {
             ))}
           </div>
 
-          {/* What this can and cannot measure */}
+          
           <details className="bg-card border border-border rounded-xl p-6">
             <summary className="text-sm font-black tracking-widest text-foreground cursor-pointer"
               style={{ fontFamily: "'Barlow Condensed', sans-serif" }}>
@@ -1420,7 +1360,7 @@ export default function App() {
             </p>
           </details>
 
-          {/* CTA */}
+          
           <div className="flex items-center justify-between pt-2 pb-8">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <TrendingUp className="w-3.5 h-3.5" />
