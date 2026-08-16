@@ -31,6 +31,21 @@ DETECTOR_LITE0 = ("efficientdet_lite0.tflite",
                   "https://storage.googleapis.com/mediapipe-models/object_detector/"
                   "efficientdet_lite0/float32/1/efficientdet_lite0.tflite")
 
+# The ball detector. YOLO11x replaced EfficientDet-Lite2 after a head-to-head on
+# real kick photos: same detections where both fired, higher confidence on the
+# ones that separated them (0.94 vs 0.89), and — the reason it won — a clean
+# zero on frames with no ball, where the alternatives invented confident false
+# positives. A wrong ball is worse than no ball here, because it silently skews
+# plantBallOffset while a missed frame is just interpolated by the tracker.
+#
+# LICENSING: these weights are AGPL-3.0 via Ultralytics. This server is exposed
+# publicly over ngrok, and AGPL section 13 obliges you to offer the Corresponding
+# Source to anyone interacting with it over the network. EfficientDet-Lite2
+# (Apache-2.0) is still wired up behind SFAI_BALL_BACKEND=efficientdet if that
+# obligation is a problem.
+YOLO11X = ("yolo11x.pt",
+           "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11x.pt")
+
 
 def ensure(asset: tuple[str, str]) -> str:
     """Return a local path to `asset`, downloading it on first use."""
@@ -56,9 +71,16 @@ def ensure(asset: tuple[str, str]) -> str:
     return str(dest)
 
 
+def ball_asset() -> tuple[str, str]:
+    """Whichever ball detector this deployment is configured for."""
+    if os.environ.get("SFAI_BALL_BACKEND", "yolo").strip().lower() == "efficientdet":
+        return DETECTOR_LITE2
+    return YOLO11X
+
+
 def prefetch_all() -> dict:
     """Warm the cache at startup so the first request is not paying for it."""
     return {
         "pose": ensure(POSE_HEAVY),
-        "detector": ensure(DETECTOR_LITE2),
+        "detector": ensure(ball_asset()),
     }

@@ -5,3 +5,9 @@ mediapipe>=0.10.14
 opencv-python>=4.9
 numpy>=1.26
 httpx>=0.27
+# Ball detection. NOTE: ultralytics is AGPL-3.0 and this server is exposed
+# publicly, so section 13 applies — see models_cache.YOLO11X. Set
+# SFAI_BALL_BACKEND=efficientdet to fall back to the Apache-2.0 detector and
+# drop this dependency.
+ultralytics>=8.3
+torch>=2.0
