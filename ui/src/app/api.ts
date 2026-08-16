@@ -104,7 +104,12 @@ export interface AnalysisResult {
   frames: Record<PhaseKey, FrameOut>;
   warnings: string[];
   video: Record<string, unknown>;
-  timing: { decodeMs: number; detectMs: number; totalMs: number };
+  /** One short freeform paragraph per phase from Gemini, grounded in the same
+   *  measurements as the rule-based score. Absent (or a phase missing from
+   *  it) when GEMINI_API_KEY isn't configured server-side, or that call
+   *  failed — never required for the rest of the report to work. */
+  aiFeedback: Partial<Record<PhaseKey, string>> | null;
+  timing: { decodeMs: number; detectMs: number; aiMs?: number; totalMs: number };
 }
 
 export interface Health {
@@ -114,6 +119,9 @@ export interface Health {
   ballModel: string;
   maxUploadMb: number;
   maxEdge: number;
+  /** Whether the server has a GEMINI_API_KEY configured — i.e. whether phase
+   *  frames get forwarded to Gemini for AI coaching text. */
+  aiFeedback: boolean;
 }
 
 export interface AnalyseSpec {

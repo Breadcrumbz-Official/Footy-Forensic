@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect, useLayoutEffect } from "react
 import {
   Upload, Camera, ChevronRight, ChevronLeft, CheckCircle2, RotateCcw,
   Play, Pause, Zap, AlertCircle, TrendingUp, AlertTriangle,
-  Info, SwitchCamera, Square, X
+  Info, SwitchCamera, Square, X, Sparkles
 } from "lucide-react";
 
 import * as api from "./api";
@@ -1210,6 +1210,7 @@ export default function App() {
 
           <p className="text-xs text-center text-muted-foreground mt-4">
             Your video is uploaded to the analysis server, then deleted once its frames have been read.
+            {health?.aiFeedback && " The three measured frames are also sent to Google's Gemini API for AI coaching notes."}
           </p>
         </div>
       )}
@@ -1513,6 +1514,21 @@ export default function App() {
                       {p.ballFound ? "ball tracked" : "no ball tracked"}
                     </div>
                   </div>
+
+                  {p.aiNote && (
+                    <div className="mt-3 pt-3 border-t border-border">
+                      <div className="flex items-center gap-1.5 mb-1.5">
+                        <Sparkles className="w-3 h-3 text-primary" />
+                        <span
+                          className="text-[10px] font-bold tracking-widest text-muted-foreground"
+                          style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
+                        >
+                          AI COACH
+                        </span>
+                      </div>
+                      <p className="text-xs text-foreground leading-relaxed">{p.aiNote}</p>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
