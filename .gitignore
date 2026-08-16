@@ -5,6 +5,10 @@ sfai_env/
 .venv/
 venv/
 
+# Secrets — GEMINI_API_KEY lives here for a local run, never commit it.
+server/.env
+.env
+
 # Node / Vite client
 ui/node_modules/
 ui/dist/

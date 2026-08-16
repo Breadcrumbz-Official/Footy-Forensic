@@ -194,7 +194,12 @@ export function ReelScrubber({
   const endDrag = () => { dragging.current = false; };
 
   return (
-    <div className="relative select-none">
+    // overflow-hidden here (not just on the scroll child below, which only
+    // clips the X axis) contains the active-window spotlight's box-shadow —
+    // its 9999px spread is what paints the dimmed area outside the capture
+    // window, and with nothing clipping the Y axis that shadow bled past the
+    // ~80px-tall strip and darkened the entire page above and below it.
+    <div className="relative select-none overflow-hidden">
       <div
         ref={outerRef}
         onScroll={handleScroll}
