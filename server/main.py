@@ -146,7 +146,7 @@ def health():
         "ok": True,
         "workers": WORKERS,
         "poseModel": os.path.basename(models_cache.POSE_HEAVY[0]),
-        "ballModel": os.path.basename(models_cache.DETECTOR_LITE2[0]),
+        "ballModel": os.path.basename(models_cache.ball_asset()[0]),
         "maxUploadMb": MAX_UPLOAD_MB,
         "maxEdge": video.MAX_EDGE,
         "aiFeedback": gemini_feedback.enabled(),
