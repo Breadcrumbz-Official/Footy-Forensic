@@ -503,11 +503,6 @@ export default function App() {
         <div className="max-w-5xl mx-auto px-6">
           {/* Hero */}
           <div className="pt-20 pb-16 text-center">
-            <div className="inline-flex items-center gap-2 text-[11px] font-medium tracking-widest text-primary border border-primary/25 px-3 py-1.5 rounded-full mb-8"
-              style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-              <Zap className="w-3 h-3" />
-              MEDIAPIPE POSE LANDMARKER · 33 KEYPOINTS
-            </div>
             <h1
               className="text-foreground leading-none mb-6"
               style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: "clamp(3rem, 10vw, 7rem)", fontWeight: 900, letterSpacing: "-0.01em" }}
@@ -743,7 +738,7 @@ export default function App() {
           </div>
 
           {/* Filming + privacy notice */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-20">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-36">
             <div className="flex items-start gap-2.5 border border-border rounded-xl p-4">
               <Info className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
               <p className="text-xs text-muted-foreground leading-relaxed">
@@ -1119,10 +1114,6 @@ export default function App() {
               >
                 SHOT ANALYSIS REPORT
               </h2>
-              <p className="text-sm text-muted-foreground mt-1">
-                MediaPipe Pose Landmarker · 33 keypoints · {results.phases.length} phases analyzed
-                {results.timing?.totalMs != null && ` · ${(results.timing.totalMs / 1000).toFixed(1)}s`}
-              </p>
             </div>
             <button
               onClick={reset}

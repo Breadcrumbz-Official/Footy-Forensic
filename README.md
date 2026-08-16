@@ -1,4 +1,4 @@
-# Soccer Form AI
+# Foot Form
 
 Record or upload a video of a soccer kick, pick three key moments, and get
 biomechanical analysis and coaching feedback.
