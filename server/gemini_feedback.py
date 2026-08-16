@@ -21,6 +21,7 @@ commit that file.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 
@@ -44,7 +45,14 @@ def _model() -> str:
 
 
 def _timeout_s() -> float:
-    return float(os.environ.get("SFAI_GEMINI_TIMEOUT_S", "20"))
+    # Measured latency for one image + paragraph call swings between about 3
+    # and 20 seconds, the slow end being a cold connection. At the old 20s
+    # ceiling the first of the three concurrent phase calls lost that race and
+    # came back None, so a report would arrive with one phase silently missing
+    # its paragraph. The three run concurrently, so a longer ceiling costs
+    # nothing on the normal path — it only decides how long a stuck call waits
+    # before being given up on.
+    return float(os.environ.get("SFAI_GEMINI_TIMEOUT_S", "45"))
 
 
 def enabled() -> bool:
@@ -79,9 +87,30 @@ def _metrics_block(metrics: list[dict]) -> str:
     return "\n".join(lines) if lines else "(no measurements available for this frame)"
 
 
+async def batch(items: list[tuple[str, bytes, list[dict], str]]) -> list[str | None]:
+    """Run several phase calls over ONE connection pool.
+
+    Each call used to open its own AsyncClient, so firing the three phases
+    concurrently meant three separate TLS handshakes racing each other. Measured
+    against this API that was pathological — three calls took 46s and two of
+    them timed out, where the same three over a shared client finish in about
+    1.4s each. Same requests, same concurrency; the only difference is the
+    connection pool.
+    """
+    if not _api_key():
+        return [None] * len(items)
+    async with httpx.AsyncClient(timeout=_timeout_s()) as client:
+        return list(await asyncio.gather(
+            *[phase_feedback(*item, client=client) for item in items]))
+
+
 async def phase_feedback(phase_label: str, image_bytes: bytes, metrics: list[dict],
-                         kick_side: str) -> str | None:
-    """One short coaching paragraph for one phase, or None on any failure."""
+                         kick_side: str, client: httpx.AsyncClient | None = None) -> str | None:
+    """One short coaching paragraph for one phase, or None on any failure.
+
+    Pass `client` to reuse an existing connection pool — see batch() for why
+    that matters. Without one a private client is opened for this call alone.
+    """
     key = _api_key()
     if not key:
         return None
@@ -102,13 +131,28 @@ async def phase_feedback(phase_label: str, image_bytes: bytes, metrics: list[dic
                                  "data": base64.b64encode(image_bytes).decode("ascii")}},
             ],
         }],
-        "generationConfig": {"temperature": 0.6, "maxOutputTokens": 350},
+        # Gemini 3.x are thinking models, and thinking tokens are charged
+        # against maxOutputTokens. Left alone, a 350 budget was spent almost
+        # entirely on thoughts (336 of 350) and the reply came back truncated
+        # after ten tokens with finishReason MAX_TOKENS — which phase_feedback
+        # then returned as a half-sentence. There is nothing here worth
+        # thinking about: the measurements are given and the task is to write
+        # one paragraph, so thinking is switched off. The larger ceiling is
+        # headroom in case a future model ignores thinkingConfig.
+        "generationConfig": {
+            "temperature": 0.6,
+            "maxOutputTokens": 700,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
     }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{_model()}:generateContent"
 
     try:
-        async with httpx.AsyncClient(timeout=_timeout_s()) as client:
+        if client is not None:
             resp = await client.post(url, params={"key": key}, json=body)
+        else:
+            async with httpx.AsyncClient(timeout=_timeout_s()) as own:
+                resp = await own.post(url, params={"key": key}, json=body)
         resp.raise_for_status()
         data = resp.json()
         parts = data["candidates"][0]["content"]["parts"]
