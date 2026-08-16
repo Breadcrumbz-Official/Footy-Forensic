@@ -325,9 +325,10 @@ async def _ai_feedback(jpeg_bytes: dict[str, bytes], scored: dict, ctx) -> dict 
     if not gemini_feedback.enabled():
         return None
     try:
-        texts = await asyncio.gather(*[
-            gemini_feedback.phase_feedback(
-                PHASE_LABEL[p], jpeg_bytes[p], scored["phases"][p]["metrics"], ctx.kick_side)
+        # One shared connection pool across the three, which is worth an order
+        # of magnitude here — see gemini_feedback.batch().
+        texts = await gemini_feedback.batch([
+            (PHASE_LABEL[p], jpeg_bytes[p], scored["phases"][p]["metrics"], ctx.kick_side)
             for p in PHASES
         ])
     except Exception:
