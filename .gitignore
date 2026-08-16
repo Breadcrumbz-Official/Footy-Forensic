@@ -19,3 +19,6 @@ ui/dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# YOLO11x weights (114MB) — fetched by models_cache on first run, not committed.
+server/models/yolo11x.pt
