@@ -1,9 +1,9 @@
 /* api.js — talks to the analysis server.
  *
- * The browser no longer scores anything. It captures the video, shows the live
- * overlay, and lets the user pick three moments; the server decodes the video
- * at full resolution, runs the heavy pose model and the ball tracker, and
- * returns the finished analysis. See server/main.py.
+ * The browser runs no model and scores nothing. It captures the video and lets
+ * the user pick three moments; the server decodes the video at full resolution,
+ * runs the heavy pose model and the ball tracker, and returns the finished
+ * analysis. See server/main.py.
  *
  * The server address is fixed rather than user-entered — there is exactly one
  * deployment this app talks to. Update SERVER_URL when the tunnel changes.

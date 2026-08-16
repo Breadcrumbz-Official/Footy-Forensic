@@ -15,8 +15,6 @@ import type { DisplayMetric, DisplayResults } from "./results";
 import { Recorder, ensureFiniteDuration, REC_LIMIT_MS, REC_MIN_MS } from "./recorder";
 import { ReelScrubber } from "./ReelScrubber";
 import type { ReelMarker } from "./ReelScrubber";
-import { Toggle } from "./Toggle";
-import * as live from "./liveOverlay";
 
 type Step = "upload" | "select" | "analyzing" | "results";
 
@@ -112,19 +110,11 @@ export default function App() {
   const [elapsed, setElapsed] = useState(0);
   const [facing, setFacing] = useState<"environment" | "user">("environment");
 
-  // Live overlay options. Each is independent: the detectors are only loaded
-  // when something that needs them is switched on.
-  const [showSkeleton, setShowSkeleton] = useState(false);
-  const [showAngles, setShowAngles] = useState(false);
-  const [showBall, setShowBall] = useState(false);
-  const [engineNote, setEngineNote] = useState<string | null>(null);
-
   const videoRef = useRef<HTMLVideoElement>(null);
   const thumbVideoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const thumbsExtractedFor = useRef<string>("");
   const camPreviewRef = useRef<HTMLVideoElement>(null);
-  const camOverlayRef = useRef<HTMLCanvasElement>(null);
   const recorderRef = useRef<Recorder | null>(null);
   const seekRaf = useRef<number | null>(null);
   const pendingSeek = useRef<number | null>(null);
@@ -273,126 +263,6 @@ export default function App() {
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop();
   }, []);
-
-  /* ── Live overlay ────────────────────────────────────────────────────── */
-
-  const overlayOn = showSkeleton || showAngles || showBall;
-
-  /**
-   * Detection loop for the preview overlay.
-   *
-   * Only the models an enabled option actually needs get loaded, and the whole
-   * loop is torn down when every option is off — a phone should not be running
-   * a pose graph to draw nothing. Pose is gated to ~30fps and the ball detector
-   * to ~5fps (in practice slower — CPU object detection runs several times the
-   * cost of pose's GPU-driven tick), which is what the previous client settled
-   * on: the ball moves far less between frames than the skeleton does, and it
-   * is the expensive one.
-   *
-   * That gap between "a fresh pose every tick" and "a fresh ball every few
-   * hundred ms" is not closeable by asking the model for more frames — the
-   * fix is to not need more of them. Rather than redraw the last detection
-   * frozen in place (a hold-then-jump next to the buttery skeleton), each tick
-   * extrapolates the ball along its last known velocity, the same
-   * dead-reckoning trick video game netcode uses to hide a sparse, laggy
-   * signal. ballPrev/ballCurr are the two most recent real detections;
-   * getSmoothedBall projects forward from them.
-   */
-  useEffect(() => {
-    const canvas = camOverlayRef.current;
-    if (!camOpen || !camReady || !overlayOn) {
-      const g = canvas?.getContext("2d");
-      if (canvas && g) g.clearRect(0, 0, canvas.width, canvas.height);
-      return;
-    }
-
-    let cancelled = false;
-    let raf = 0;
-    let lastPoseAt = 0;
-    let lastBallAt = 0;
-    let pts: live.Pt[] | null = null;
-    // {x, y, r, t} — the two most recent real ball detections, for velocity.
-    let ballPrev: (live.Ball & { t: number }) | null = null;
-    let ballCurr: (live.Ball & { t: number }) | null = null;
-    const BALL_EXTRAPOLATE_MAX_MS = 350; // stop projecting motion past this —
-                                          // a ball unseen this long is not
-                                          // still traveling in a straight
-                                          // line; hold position instead
-
-    const getSmoothedBall = (now: number): live.Ball | null => {
-      if (!ballCurr) return null;
-      if (!ballPrev) return ballCurr;
-      const dt = ballCurr.t - ballPrev.t;
-      const elapsed = now - ballCurr.t;
-      if (dt <= 0 || elapsed < 0 || elapsed > BALL_EXTRAPOLATE_MAX_MS) return ballCurr;
-      const vx = (ballCurr.x - ballPrev.x) / dt;
-      const vy = (ballCurr.y - ballPrev.y) / dt;
-      return { x: ballCurr.x + vx * elapsed, y: ballCurr.y + vy * elapsed, r: ballCurr.r, score: ballCurr.score };
-    };
-
-    (async () => {
-      try {
-        setEngineNote("Loading detection models…");
-        await Promise.all([
-          (showSkeleton || showAngles) ? live.initPose() : Promise.resolve(),
-          showBall ? live.initBall() : Promise.resolve(),
-        ]);
-        if (cancelled) return;
-        live.resetLiveClocks();
-        setEngineNote(null);
-      } catch (err) {
-        if (!cancelled) {
-          setEngineNote(`Live overlay unavailable: ${(err as Error).message}. Recording still works.`);
-        }
-        return;
-      }
-
-      const loop = () => {
-        if (cancelled) return;
-        raf = requestAnimationFrame(loop);
-
-        const v = camPreviewRef.current;
-        const c = camOverlayRef.current;
-        if (!v || !c || !v.videoWidth) return;
-        if (c.width !== v.videoWidth || c.height !== v.videoHeight) {
-          c.width = v.videoWidth;
-          c.height = v.videoHeight;
-        }
-
-        const now = performance.now();
-        if ((showSkeleton || showAngles) && now - lastPoseAt > 33) {
-          lastPoseAt = now;
-          pts = live.detectPoseLive(v);
-        }
-        if (showBall && now - lastBallAt > 200) {
-          lastBallAt = now;
-          const b = live.detectBallLive(v, pts ? live.torsoScale(pts) : 0);
-          if (b) { ballPrev = ballCurr; ballCurr = { ...b, t: now }; }
-          // A real miss (ball genuinely gone, per detectBallLive's own forget
-          // logic) — stop extrapolating rather than fly a phantom ring onward.
-          else { ballPrev = ballCurr = null; }
-        }
-
-        live.drawOverlay(c, (showSkeleton || showAngles) ? pts : null, {
-          skeleton: showSkeleton,
-          angles: showAngles,
-          ball: showBall ? getSmoothedBall(now) : null,
-          // The front camera preview is mirrored for the user, so the overlay
-          // has to be mirrored to sit on top of what they are looking at.
-          mirrored: facing === "user",
-        });
-      };
-      loop();
-    })();
-
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(raf);
-    };
-  }, [camOpen, camReady, overlayOn, showSkeleton, showAngles, showBall, facing]);
-
-  // Free the wasm/GPU resources once the camera is gone for good.
-  useEffect(() => () => live.closeLive(), []);
 
   const togglePlay = () => {
     if (!videoRef.current) return;
@@ -765,14 +635,6 @@ export default function App() {
                   muted
                   autoPlay
                 />
-                {/* Transparent overlay, sized to the camera's intrinsic frame
-                    and laid over the preview with the same object-contain box
-                    so the drawing lines up at any aspect ratio. */}
-                <canvas
-                  ref={camOverlayRef}
-                  className="absolute inset-0 w-full h-full pointer-events-none"
-                  style={{ objectFit: "contain" }}
-                />
                 {isRecording && (
                   <>
                     <div
@@ -832,59 +694,7 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Live overlay options */}
-              <div className="mt-5 pt-4 border-t border-border">
-                <div className="flex items-center justify-between mb-3">
-                  <span
-                    className="text-[11px] font-black tracking-widest text-muted-foreground"
-                    style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
-                  >
-                    LIVE PREVIEW OVERLAY
-                  </span>
-                  {engineNote && (
-                    <span className="text-[10px] text-muted-foreground flex items-center gap-1.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-                      {engineNote}
-                    </span>
-                  )}
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <Toggle
-                    label="Skeleton"
-                    hint="33 pose landmarks, drawn live"
-                    checked={showSkeleton}
-                    onChange={setShowSkeleton}
-                  />
-                  <Toggle
-                    label="Joint angles"
-                    hint="Knee, hip and ankle, in degrees"
-                    checked={showAngles}
-                    onChange={setShowAngles}
-                  />
-                  <Toggle
-                    label="Highlight ball"
-                    hint="Rings the ball when it is detected"
-                    checked={showBall}
-                    onChange={setShowBall}
-                  />
-                  <Toggle
-                    label="Front camera"
-                    hint={facing === "user" ? "Selfie camera, preview mirrored" : "Rear camera"}
-                    checked={facing === "user"}
-                    onChange={flipCamera}
-                    disabled={!camReady || isRecording}
-                  />
-                </div>
-
-                <p className="text-[11px] text-muted-foreground/70 mt-3 leading-relaxed">
-                  The overlay runs entirely in this tab — no frame leaves your device for it, and it is
-                  a framing aid only. Nothing here is scored; the analysis re-runs a heavier model on
-                  the server against the original video.
-                </p>
-              </div>
-
-              <p className="text-xs text-muted-foreground mt-3 leading-relaxed">
+              <p className="text-xs text-muted-foreground mt-5 pt-4 border-t border-border leading-relaxed">
                 Prop the phone side-on to the ball, level with it, whole body in frame. Recording stops
                 automatically at {REC_LIMIT_MS / 1000} seconds — you only need the run-up and the strike.
               </p>
