@@ -1,4 +1,4 @@
-"""PoseLandmarker wrapper — the only pose model in the app.
+"""PoseLandmarker wrapper — the server-side counterpart of js/mediapipe.js.
 
 Runs in VIDEO mode over short ordered clips rather than single stills. The
 moment with the most motion blur in a kick — the foot at contact — is exactly

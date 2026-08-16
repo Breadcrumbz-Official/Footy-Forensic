@@ -18,6 +18,7 @@ from biomechanics import to_pixels, torso_scale
 
 _pose: pose_mod.PoseSession | None = None
 _ball: ball_detection.BallSession | None = None
+_ypose = None
 
 
 def _sessions():
@@ -27,6 +28,23 @@ def _sessions():
     if _ball is None:
         _ball = ball_detection.BallSession()
     return _pose, _ball
+
+
+def repose_frame(image):
+    """Re-detect one frame's landmarks with the fallback pose model.
+
+    Called only for frames the vision check flagged as having a skeleton that
+    is not on the player. Loaded lazily because most runs never need it, and
+    the weights are ~118MB per worker process.
+    """
+    global _ypose
+    import pose_yolo
+    if _ypose is None:
+        _ypose = pose_yolo.YoloPoseSession()
+    try:
+        return _ypose.detect(image)
+    except Exception:
+        return None
 
 
 def analyse_phase(clip: list[dict], center_time: float) -> dict:

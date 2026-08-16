@@ -13,8 +13,9 @@
   <h1>Soccer Form AI</h1>
   <p class="muted">Record or upload a kick, pick 3 key moments, get biomechanical coaching.</p>
   <p class="notice"><strong>Your video is uploaded to the analysis server when you press Analyze.</strong>
-     The camera preview stays in this tab until then. The server deletes each upload as
-     soon as it has read the frames it needs.</p>
+     The live camera preview and skeleton run locally in this tab and are not sent anywhere.
+     The server deletes each upload as soon as it has read the frames it needs.</p>
+  <p id="engineStatus" class="muted">Live preview engines: loading…</p>
   <p id="serverStatus" class="muted"></p>
 </header>
 
@@ -51,9 +52,19 @@
     <span id="recTimer"></span>
   </div>
 
+  <div class="row">
+    <label><input type="checkbox" id="chkLiveSkeleton"> Show skeleton</label>
+    <label><input type="checkbox" id="chkLiveAngles"> Show joint angles</label>
+    <label><input type="checkbox" id="chkLiveBall"> Show ball</label>
+  </div>
+  <p class="muted">Live preview only, computed in this tab. The joint angles are read off the
+     same three landmark coordinates the server scores with (e.g. hip-knee-ankle for a knee).</p>
+
   <div id="camWrap" class="camWrap">
     <video id="camPreview" playsinline muted autoplay hidden></video>
+    <canvas id="camOverlay" hidden></canvas>
   </div>
+  <p id="viewHint" class="muted"></p>
   <p id="inputMsg" class="msg"></p>
 </section>
 

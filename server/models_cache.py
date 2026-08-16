@@ -46,6 +46,11 @@ DETECTOR_LITE0 = ("efficientdet_lite0.tflite",
 YOLO11X = ("yolo11x.pt",
            "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11x.pt")
 
+# Fallback pose estimator, used only for frames where the vision check says
+# MediaPipe's skeleton is not on the player. Same AGPL-3.0 note as above.
+YOLO11X_POSE = ("yolo11x-pose.pt",
+                "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11x-pose.pt")
+
 
 def ensure(asset: tuple[str, str]) -> str:
     """Return a local path to `asset`, downloading it on first use."""

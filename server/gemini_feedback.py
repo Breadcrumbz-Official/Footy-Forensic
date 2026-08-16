@@ -87,6 +87,82 @@ def _metrics_block(metrics: list[dict]) -> str:
     return "\n".join(lines) if lines else "(no measurements available for this frame)"
 
 
+_VERIFY_SYSTEM = (
+    "You are checking a computer-vision overlay for gross errors. The image is "
+    "a video frame of a person kicking a ball, with a detected skeleton drawn "
+    "over it as cyan/grey lines and yellow joint dots, and possibly a pink ring "
+    "around the ball. Your only job is to judge whether that skeleton is drawn "
+    "on the kicking player's actual body.\n\n"
+    "Answer NO only for a gross failure: the skeleton is on a different person, "
+    "on empty background, badly offset from the body, or its limbs clearly do "
+    "not follow the player's limbs.\n\n"
+    "Answer YES if the skeleton broadly follows the player, even if it is "
+    "imperfect — a joint a little off, a foot or hand slightly misplaced, or "
+    "limbs missing where they leave frame or are hidden are all normal and "
+    "still YES. A blurry or awkward-looking pose is not itself a failure.\n\n"
+    "Reply with exactly one word: YES or NO."
+)
+
+
+async def verify_skeleton(image_bytes: bytes,
+                          client: httpx.AsyncClient | None = None) -> bool | None:
+    """Is the drawn skeleton on the player? True/False, or None if unanswerable.
+
+    None matters as much as the other two: an unreachable or confused check must
+    leave MediaPipe's result alone rather than trigger a fallback, so callers
+    treat anything other than an explicit False as "keep what we have".
+    """
+    key = _api_key()
+    if not key:
+        return None
+    body = {
+        "system_instruction": {"parts": [{"text": _VERIFY_SYSTEM}]},
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": "Is the drawn skeleton on the player's body? YES or NO."},
+                {"inline_data": {"mime_type": "image/jpeg",
+                                 "data": base64.b64encode(image_bytes).decode("ascii")}},
+            ],
+        }],
+        # Deterministic: this is a yes/no gate that decides whether to throw
+        # away a good skeleton, so it should not vary run to run.
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 200,
+                             "thinkingConfig": {"thinkingBudget": 0}},
+    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{_model()}:generateContent"
+    try:
+        if client is not None:
+            resp = await client.post(url, params={"key": key}, json=body)
+        else:
+            async with httpx.AsyncClient(timeout=_timeout_s()) as own:
+                resp = await own.post(url, params={"key": key}, json=body)
+        resp.raise_for_status()
+        parts = resp.json()["candidates"][0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts if "text" in p).strip().upper()
+        if not text:
+            return None
+        # Substring rather than equality: the model occasionally prefixes a
+        # word. Check NO first — "NO" appears inside neither "YES" nor common
+        # affirmative phrasings, while a bare "not aligned" contains no "YES".
+        if "NO" in text:
+            return False
+        if "YES" in text:
+            return True
+        return None
+    except Exception:
+        return None
+
+
+async def verify_batch(images: list[bytes]) -> list[bool | None]:
+    """Verify several frames over one connection pool. See batch()."""
+    if not _api_key():
+        return [None] * len(images)
+    async with httpx.AsyncClient(timeout=_timeout_s()) as client:
+        return list(await asyncio.gather(
+            *[verify_skeleton(img, client=client) for img in images]))
+
+
 async def batch(items: list[tuple[str, bytes, list[dict], str]]) -> list[str | None]:
     """Run several phase calls over ONE connection pool.
 

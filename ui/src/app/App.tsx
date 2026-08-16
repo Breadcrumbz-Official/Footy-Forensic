@@ -110,6 +110,9 @@ export default function App() {
   const [elapsed, setElapsed] = useState(0);
   const [facing, setFacing] = useState<"environment" | "user">("environment");
 
+  // Live overlay options. Each is independent: the detectors are only loaded
+  // when something that needs them is switched on.
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const thumbVideoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -694,7 +697,7 @@ export default function App() {
                 </button>
               </div>
 
-              <p className="text-xs text-muted-foreground mt-5 pt-4 border-t border-border leading-relaxed">
+              <p className="text-xs text-muted-foreground mt-3 leading-relaxed">
                 Prop the phone side-on to the ball, level with it, whole body in frame. Recording stops
                 automatically at {REC_LIMIT_MS / 1000} seconds — you only need the run-up and the strike.
               </p>
@@ -1323,6 +1326,9 @@ export default function App() {
                     <div className={p.ballFound ? "" : "text-muted-foreground/60"}>
                       {p.ballFound ? "ball tracked" : "no ball tracked"}
                     </div>
+                    {p.reposed && (
+                      <div className="text-[#ffb800]">skeleton re-detected (backup model)</div>
+                    )}
                   </div>
 
                   {p.aiNote && (

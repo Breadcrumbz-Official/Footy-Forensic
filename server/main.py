@@ -1,8 +1,8 @@
 """Soccer Form AI — analysis server.
 
-The browser captures the video and lets the user pick three moments; it runs no
-model of its own. Everything after that happens here: decoding at native
-resolution, pose across each clip with the heavy model, ball tracking,
+The browser captures the video, shows the live skeleton/ball overlay, and lets
+the user pick three moments. Everything after that happens here: decoding at
+native resolution, pose across each clip with the heavy model, ball tracking,
 biomechanics and scoring.
 
 Run:
@@ -66,7 +66,7 @@ import gemini_feedback
 import models_cache
 import scoring
 import video
-from worker import analyse_phase
+from worker import analyse_phase, repose_frame
 
 PHASES = ("plant", "contact", "followThrough")
 PHASE_LABEL = {"plant": "Plant + Backswing", "contact": "Contact",
@@ -276,10 +276,17 @@ async def _run(path: str, spec: AnalyseSpec) -> dict:
                   "ball": per_phase[p].get("ball"),
                   "time": per_phase[p]["time"]} for p in PHASES}
 
+    # Check the skeletons before anything is measured off them, so a frame that
+    # gets re-posed is scored on the corrected landmarks rather than corrected
+    # only in the picture.
+    t2 = time.perf_counter()
+    reposed = await _verify_and_repose(per_phase, frames)
+    verify_ms = round((time.perf_counter() - t2) * 1000)
+
     ctx = biomechanics.derive_context(frames, footedness=spec.footedness)
     scored = scoring.score_all(analysis.compute_metrics(frames, ctx), ctx.view.score)
 
-    warnings = _warnings(spec, ctx, frames, per_phase)
+    warnings = _warnings(spec, ctx, frames, per_phase, reposed)
 
     out_frames = {}
     jpeg_bytes = {}
@@ -296,6 +303,10 @@ async def _run(path: str, spec: AnalyseSpec) -> dict:
             "ball": _ball_out(frames[p]["ball"]),
             "ballFramesFound": per_phase[p].get("ball_found", 0),
             "clipFrames": per_phase[p].get("clip_len", 0),
+            # Which model actually produced the landmarks this phase was scored
+            # from. Shown in the client, because a re-posed frame is measured
+            # from a different keypoint set and the viewer should know.
+            "reposed": bool(reposed.get(p)),
             "image": "data:image/jpeg;base64," + base64.b64encode(jb).decode("ascii"),
         }
 
@@ -311,8 +322,59 @@ async def _run(path: str, spec: AnalyseSpec) -> dict:
         "warnings": warnings,
         "video": info,
         "aiFeedback": ai_feedback,
-        "timing": {"decodeMs": decode_ms, "detectMs": detect_ms, "aiMs": ai_ms},
+        "timing": {"decodeMs": decode_ms, "detectMs": detect_ms,
+                   "verifyMs": verify_ms, "aiMs": ai_ms},
     }
+
+
+async def _verify_and_repose(per_phase: dict, frames: dict) -> dict[str, bool]:
+    """Check each phase's skeleton against its own frame; re-pose the failures.
+
+    MediaPipe's confidence numbers cannot catch its worst failure — locking onto
+    a bystander, a shadow or a half-body ghost — because a skeleton on the wrong
+    subject is still a confident, well-formed skeleton. Looking at the drawn
+    overlay does catch it, so the frame the user will see is exactly what gets
+    checked.
+
+    Conservative by construction. A frame is only re-posed on an explicit "not
+    aligned", and the replacement is only accepted if the fallback model
+    actually returns a usable skeleton — every other outcome (no API key, a
+    timeout, an unparseable answer, no person found) leaves MediaPipe's result
+    exactly as it was. The fallback carries fewer keypoints than MediaPipe, so
+    swapping on a maybe would trade a good skeleton for a poorer one.
+    """
+    out = {p: False for p in PHASES}
+    if not gemini_feedback.enabled():
+        return out
+
+    shots = []
+    for p in PHASES:
+        drawn = analysis.draw_pose(per_phase[p]["image"], frames[p]["pts"],
+                                   None, frames[p]["ball"])
+        shots.append(video.encode_jpeg(drawn))
+
+    try:
+        verdicts = await gemini_feedback.verify_batch(shots)
+    except Exception:
+        return out
+
+    bad = [p for p, ok in zip(PHASES, verdicts) if ok is False]
+    if not bad:
+        return out
+
+    loop = asyncio.get_running_loop()
+    try:
+        results = await asyncio.gather(*[
+            loop.run_in_executor(_pool, repose_frame, per_phase[p]["image"]) for p in bad
+        ])
+    except Exception:
+        return out
+
+    for p, pts in zip(bad, results):
+        if pts is not None:
+            frames[p]["pts"] = pts
+            out[p] = True
+    return out
 
 
 async def _ai_feedback(jpeg_bytes: dict[str, bytes], scored: dict, ctx) -> dict | None:
@@ -346,8 +408,14 @@ def _ball_out(ball):
             "rescued": bool(ball.get("rescued"))}
 
 
-def _warnings(spec: AnalyseSpec, ctx, frames, per_phase) -> list[str]:
+def _warnings(spec: AnalyseSpec, ctx, frames, per_phase, reposed=None) -> list[str]:
     out = []
+
+    for p in PHASES:
+        if (reposed or {}).get(p):
+            out.append(f"{PHASE_LABEL[p]}: the first skeleton didn't sit on your "
+                       "body, so this frame was re-detected with the backup pose "
+                       "model. Ankle lock isn't measurable from it and was skipped.")
 
     times = [spec.phases[p].time for p in PHASES]
     if not (times[0] < times[1] < times[2]):

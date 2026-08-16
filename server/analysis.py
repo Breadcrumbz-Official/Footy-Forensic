@@ -29,26 +29,12 @@ def _m(value, p, idxs):
 def _m_ball(value, p, idxs, ball):
     """A ball-derived measurement carries the ball detection's reliability as
     well as the landmarks'. No ball found reads as zero confidence, so the
-    scoring engine drops the metric instead of guessing.
-
-    Reliability comes from the detector's own score rather than a flat constant,
-    so a ball the model barely resolved counts for less than one it nailed. The
-    raw score is not usable as-is: detections are admitted from SCORE_FLOOR
-    (0.2) upward, and the frame that matters most — contact — is where the ball
-    is blurriest and scores lowest, so raw score would discard exactly the
-    readings we want. A detection that survived the track search has also
-    already been vetted for temporal coherence, which its per-frame score knows
-    nothing about. Mapping into [0.5, 1.0] keeps that evidence: the score still
-    orders detections by quality, but a low one weakens the metric instead of
-    silently deleting it. Interpolated positions are discounted again as
-    inference rather than observation, and still clear the visibility gate."""
+    scoring engine drops the metric instead of guessing; a position that was
+    interpolated across a gap is discounted rather than treated as an
+    observation, but still clears the visibility gate."""
     if not ball:
         return {"value": NAN, "vis": 0.0}
-    score = ball.get("score")
-    score = 0.0 if score is None or score != score else min(max(score, 0.0), 1.0)
-    ball_vis = 0.5 + 0.5 * score
-    if ball.get("interpolated"):
-        ball_vis *= 0.8
+    ball_vis = 0.55 if ball.get("interpolated") else 1.0
     return {"value": value, "vis": min(min_vis(p, idxs), ball_vis)}
 
 

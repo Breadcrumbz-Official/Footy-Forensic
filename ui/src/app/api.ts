@@ -82,6 +82,9 @@ export interface FrameOut {
   ball: Ball | null;
   ballFramesFound: number;
   clipFrames: number;
+  /** True when MediaPipe's skeleton failed the alignment check and this frame
+   *  was re-detected with the fallback pose model. */
+  reposed?: boolean;
   /** data:image/jpeg;base64,... — the annotated frame the server drew. */
   image: string;
 }
@@ -109,7 +112,7 @@ export interface AnalysisResult {
    *  it) when GEMINI_API_KEY isn't configured server-side, or that call
    *  failed — never required for the rest of the report to work. */
   aiFeedback: Partial<Record<PhaseKey, string>> | null;
-  timing: { decodeMs: number; detectMs: number; aiMs?: number; totalMs: number };
+  timing: { decodeMs: number; detectMs: number; verifyMs?: number; aiMs?: number; totalMs: number };
 }
 
 export interface Health {

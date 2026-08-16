@@ -44,6 +44,9 @@ export interface DisplayPhase {
   time: number | null;
   shiftedMs: number;
   ballFound: boolean;
+  /** True when the first skeleton failed the alignment check and this frame was
+   *  re-detected with the fallback pose model. */
+  reposed: boolean;
   /** Gemini's short freeform paragraph for this phase, or null if AI
    *  feedback isn't configured server-side or that call didn't come back. */
   aiNote: string | null;
@@ -174,6 +177,7 @@ export function toDisplay(result: AnalysisResult): DisplayResults {
       time: frame?.time ?? null,
       shiftedMs: frame?.shiftedMs ?? 0,
       ballFound: Boolean(frame?.ball),
+      reposed: Boolean(frame?.reposed),
       aiNote: result.aiFeedback?.[key] ?? null,
     };
   });
