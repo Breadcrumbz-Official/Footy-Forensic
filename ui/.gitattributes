@@ -1,0 +1,1 @@
+server/models/yolo11x-pose.pt filter=lfs diff=lfs merge=lfs -text
